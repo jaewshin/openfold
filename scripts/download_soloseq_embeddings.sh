@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Downloads OpenFold SoloSeq (single sequence model) parameters.
+# Downloads ESM-1b embeddings used to train OpenFold SoloSeq single-seq model.
 #
-# Usage: bash download_openfold_soloseq_params.sh /path/to/download/directory
+# Usage: bash download_soloseq_embeddings.sh /path/to/download/directory
 set -e
 
 if [[ $# -eq 0 ]]; then
@@ -29,6 +29,6 @@ if ! command -v aws &> /dev/null ; then
     exit 1
 fi
 
-DOWNLOAD_DIR="${1}/openfold_soloseq_params"
+DOWNLOAD_DIR="${1}/soloseq_embeddings"
 mkdir -p "${DOWNLOAD_DIR}"
-aws s3 cp --no-sign-request --region us-east-1 s3://openfold/openfold_soloseq_params/ "${DOWNLOAD_DIR}" --recursive
+aws s3 cp --no-sign-request --region us-east-1 s3://openfold/soloseq_embeddings/ "${DOWNLOAD_DIR}" --recursive
