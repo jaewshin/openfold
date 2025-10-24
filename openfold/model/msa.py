@@ -282,7 +282,8 @@ class MSAAttention(nn.Module):
     
             biases = [mask_bias]
             if z is None and use_cuequivariance_attention:
-                z = torch.zeros_like(m)
+                z = m.new_zeros(1, self.no_heads, m.shape[-2], m.shape[-2]) 
+                
             if(z is not None):
                 biases.append(z)
 

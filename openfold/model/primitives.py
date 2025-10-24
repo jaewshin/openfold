@@ -902,9 +902,7 @@ def _cuequivariance_attn(
         bias = bias.reshape(flat_batch_size, *bias.shape[-3:])
         if mask is not None:
             mask = mask.reshape(flat_batch_size, *mask.shape[-2:])
-    # Convert bias to float32
-    bias = bias.to(dtype=torch.float32)
-    
+
     # Apply cuEquivariance triangle attention
     o = triangle_attention(
         q=q,
