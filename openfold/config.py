@@ -44,8 +44,12 @@ def enforce_config_constraints(config):
         (
             "globals.use_lma",
             "globals.use_flash",
-            "globals.use_cuequivariance_attention",
             "globals.use_deepspeed_evo_attention"
+        ),
+        (
+            "globals.use_lma",
+            "globals.use_flash",
+            "globals.use_cuequivariance_attention",
         ),
     ]
 
