@@ -46,7 +46,7 @@ from openfold.data import templates, feature_pipeline, data_pipeline
 from openfold.data.tools import hhsearch, hmmsearch
 from openfold.np import protein
 from openfold.utils.script_utils import (load_models_from_command_line, parse_fasta, run_model,
-                                         prep_output)
+                                         prep_output, relax_protein)
 from openfold.utils.tensor_utils import tensor_tree_map
 from openfold.utils.trace_utils import (
     pad_feature_dict_seq,
