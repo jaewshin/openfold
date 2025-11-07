@@ -672,11 +672,15 @@ class FusedTriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
                 norm_in_weight=self.layer_norm_in.weight,
                 norm_in_bias=self.layer_norm_in.bias,
                 p_in_weight=self.linear_ab_p.weight,
+                p_in_bias=self.linear_ab_p.bias,
                 g_in_weight=self.linear_ab_g.weight,
+                g_in_bias=self.linear_ab_g.bias,
                 norm_out_weight=self.layer_norm_out.weight,
                 norm_out_bias=self.layer_norm_out.bias,
                 p_out_weight=self.linear_z.weight,
+                p_out_bias=self.linear_z.bias,
                 g_out_weight=self.linear_g.weight,
+                g_out_bias=self.linear_g.bias,
                 eps=1e-5,
             )
             # When not inplace_safe (training), caller should have set _add_with_inplace to False
