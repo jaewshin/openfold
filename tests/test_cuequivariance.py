@@ -36,7 +36,7 @@ import tests.compare_utils as compare_utils
 from tests.data_utils import random_template_feats, random_attention_inputs
 
 
-
+@compare_utils.skip_unless_cueq_installed()
 class TestCuEquivarianceKernel(unittest.TestCase):
 
     def test_compare_template_stack(self):
@@ -133,6 +133,7 @@ class TestCuEquivarianceKernel(unittest.TestCase):
         # https://github.com/aqlaboratory/openfold/issues/532
         with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float32):
                 model = compare_utils.get_global_pretrained_openfold()
+                model.globals.use_deepspeed_evo_attention = False
                 model.globals.use_cuequivariance_attention = False
                 model.globals.use_cuequivariance_multiplicative_update = False
                 out_repro = model(batch)
