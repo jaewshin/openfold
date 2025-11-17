@@ -167,13 +167,13 @@ The **DeepSpeed DS4Sci_EvoformerAttention kernel** is a memory-efficient attent
 
 If your system supports deepseed, using deepspeed generally leads an inference speedup of 2 - 3x without significant additional memory use. You may specify this option by selecting the `--use_deepspeed_inference` argument. 
 
-OF2 supports the CUEquivariance [triangle_multiplicative_update](https://docs.nvidia.com/cuda/cuequivariance/api/generated/cuequivariance_torch.triangle_multiplicative_update.html) and [triangle_attention](https://docs.nvidia.com/cuda/cuequivariance/api/generated/cuequivariance_torch.triangle_attention.html) kernels which can speed up inference/training of the model 1.2 to 1.5 on top of DeepSpeed and even more for sequences with > 1000 residues. To enable, pass '--use_cuequivariance_attention' and  '--use_cuequivariance_multiplicative_update' arguments to run_pretrained_openfold.py.
+OF2 supports the cuEquivariance [triangle_multiplicative_update](https://docs.nvidia.com/cuda/cuequivariance/api/generated/cuequivariance_torch.triangle_multiplicative_update.html) and [triangle_attention](https://docs.nvidia.com/cuda/cuequivariance/api/generated/cuequivariance_torch.triangle_attention.html) kernels which can speed up inference/training of the model 1.2 to 1.5 on top of DeepSpeed and even more for sequences with > 1000 residues. cuEquivariance attention actually uses much less memory than default or DeepSpeed attention. To enable, pass '--use_cuequivariance_attention' and  '--use_cuequivariance_multiplicative_update' arguments to run_pretrained_openfold.py.
 CUEquivariance does fall back to DeepSpeed on shapes it does not efficiently support, so enable both for best effect. 
 
 If DeepSpeed is unavailable for your system, you may also try using [FlashAttention](https://github.com/HazyResearch/flash-attention) by adding `globals.use_flash = True` to the `--experiment_config_json`. Note that FlashAttention appears to work best for sequences with < 1000 residues.
 
 ####  Speeding up inference with TensorRT
-Alternatively (or together with CUEquivariance), you can try applying [TensorRT](https://developer.nvidia.com/tensorrt) to key modules. OF2 comes with built-in TensorRT lazy compilation support for EvoformerStack. To enable, pass '--trt_mode-run', '--trt_engine_dir', '--trt_max_sequence_len', '--trt_num_profiles' and '--trt_optimization_level' arguments to run_pretrained_openfold.py. 
+Alternatively (or together with cuEquivariance), you can try applying [TensorRT](https://developer.nvidia.com/tensorrt) to key modules. OF2 comes with built-in TensorRT lazy compilation support. It allows to build TensorRT engine for Evoformer on the first inference run and to reuse it on subsequent runs. To enable, pass '--trt_mode-run', '--trt_engine_dir', '--trt_max_sequence_len', '--trt_num_profiles' and '--trt_optimization_level' arguments to run_pretrained_openfold.py. 
 
 #### Large-scale batch inference 
 For large-scale batch inference, we offer an optional tracing mode, which massively improves runtimes at the cost of a lengthy model compilation process. To enable it, add `--trace_model` to the inference command.
