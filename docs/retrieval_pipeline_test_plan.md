@@ -10,6 +10,23 @@ The goal is to verify that data loading, retrieval injection, fusion, OpenFold f
 
 ---
 
+
+## 0) Command quickstart
+
+From the repository root, run:
+
+```bash
+DATASET_DIR=/absolute/path/to/rag_data
+
+python scripts/retrieval/testing/validate_retrieval_fixture.py --dataset_dir "$DATASET_DIR"
+python scripts/retrieval/testing/test_retrieval_fusion_modules.py
+python scripts/retrieval/testing/smoke_test_retrieval_augmented_wrapper.py
+```
+
+These scripts are provided under `scripts/retrieval/testing/`.
+
+---
+
 ## 1) Scope and assumptions
 
 ### In scope
