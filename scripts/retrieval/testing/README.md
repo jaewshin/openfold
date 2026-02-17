@@ -19,6 +19,15 @@ python -c "import torch; print(torch.__version__)"
 
 ## Quick run (all scripts)
 
+You can also run from inside `scripts/retrieval/testing/` now; the scripts auto-add the repo root to `PYTHONPATH`.
+
+```bash
+cd /workspace/openfold/scripts/retrieval/testing
+python test_retrieval_fusion_modules.py
+python smoke_test_retrieval_augmented_wrapper.py
+```
+
+
 Set your downloaded dataset path once, then run all checks:
 
 ```bash

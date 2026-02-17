@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic tests for EmbeddingRetriever and CrossAttentionFusion."""
 
+import sys
+from pathlib import Path
+
+# Allow running this file directly from any working directory.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import torch
 
 from openfold.model.retrieval_fusion import CrossAttentionFusion, EmbeddingRetriever
