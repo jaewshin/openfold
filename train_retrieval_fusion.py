@@ -143,20 +143,27 @@ class RetrievalFusionWrapper(pl.LightningModule):
         config,
         db_embs: torch.Tensor,
         db_masks: torch.Tensor,
+        struct_db_embs: torch.Tensor = None,
+        struct_db_masks: torch.Tensor = None,
         top_k: int = 16,
         retriever_proj: int = 128,
         fusion_heads: int = 8,
         fusion_dropout: float = 0.0,
+        seq_weight: float = 0.5,
+        struct_weight: float = 0.5,
+        retrieval_ablation: str = "both",
         lr: float = 1e-4,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["config", "db_embs", "db_masks"])
+        self.save_hyperparameters(ignore=["config", "db_embs", "db_masks", "struct_db_embs", "struct_db_masks"])
         self.config = config
         self.lr = lr
 
         # Embedding database — register as buffers so .to(device) works
         self.register_buffer("db_embs", db_embs)
         self.register_buffer("db_masks", db_masks)
+        self.register_buffer("struct_db_embs", struct_db_embs)
+        self.register_buffer("struct_db_masks", struct_db_masks)
 
         # Model: frozen backbone + trainable retriever & fusion
         self.model = RetrievalAugmentedFolding(
@@ -166,13 +173,22 @@ class RetrievalFusionWrapper(pl.LightningModule):
             top_k=top_k,
             fusion_heads=fusion_heads,
             fusion_dropout=fusion_dropout,
+            seq_weight=seq_weight,
+            struct_weight=struct_weight,
+            retrieval_ablation=retrieval_ablation,
         )
 
         # Loss: reuse OpenFold's composite loss
         self.loss_fn = AlphaFoldLoss(config.loss)
 
     def forward(self, batch):
-        return self.model(batch, self.db_embs, self.db_masks)
+        return self.model(
+            batch=batch,
+            db_embs=self.db_embs,
+            db_masks=self.db_masks,
+            struct_db_embs=self.struct_db_embs,
+            struct_db_masks=self.struct_db_masks,
+        )
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch)
@@ -194,6 +210,22 @@ class RetrievalFusionWrapper(pl.LightningModule):
             self.log("train/retrieval_entropy",
                      -(outputs["retrieval_scores"] *
                        outputs["retrieval_scores"].clamp(min=1e-8).log()).sum(),
+                     on_step=True, on_epoch=False, logger=True)
+        if "struct_retrieval_scores" in outputs:
+            self.log(
+                "train/struct_retrieval_entropy",
+                -(
+                    outputs["struct_retrieval_scores"]
+                    * outputs["struct_retrieval_scores"].clamp(min=1e-8).log()
+                ).sum(),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
+        if "retrieval_source_weights" in outputs:
+            self.log("train/retrieval_seq_weight", outputs["retrieval_source_weights"][0],
+                     on_step=True, on_epoch=False, logger=True)
+            self.log("train/retrieval_struct_weight", outputs["retrieval_source_weights"][1],
                      on_step=True, on_epoch=False, logger=True)
 
         return loss
@@ -263,16 +295,28 @@ def main(args):
         max_entries=args.max_db_entries,
         max_seq_len=args.db_max_seq_len,
     )
+    struct_db_embs, struct_db_masks = None, None
+    if args.struct_embedding_db_dir:
+        struct_db_embs, struct_db_masks, _ = load_embedding_database(
+            args.struct_embedding_db_dir,
+            max_entries=args.struct_max_db_entries,
+            max_seq_len=args.struct_db_max_seq_len,
+        )
 
     # --- Lightning module --------------------------------------------------
     model_module = RetrievalFusionWrapper(
         config=config,
         db_embs=db_embs,
         db_masks=db_masks,
+        struct_db_embs=struct_db_embs,
+        struct_db_masks=struct_db_masks,
         top_k=args.top_k,
         retriever_proj=args.retriever_proj_dim,
         fusion_heads=args.fusion_heads,
         fusion_dropout=args.fusion_dropout,
+        seq_weight=args.seq_weight,
+        struct_weight=args.struct_weight,
+        retrieval_ablation=args.retrieval_ablation,
         lr=args.lr,
     )
 
@@ -412,6 +456,8 @@ if __name__ == "__main__":
     # === Retrieval-specific ================================================
     parser.add_argument("--embedding_db_dir", type=str, required=True,
                         help="Directory of precomputed ESM-1b .pt files for the database")
+    parser.add_argument("--struct_embedding_db_dir", type=str, default=None,
+                        help="Optional directory of structure-side .pt embeddings for a second retriever")
     parser.add_argument("--openfold_checkpoint", type=str, default=None,
                         help="Path to a pretrained OpenFold SoloSeq checkpoint")
     parser.add_argument("--top_k", type=int, default=16,
@@ -426,6 +472,21 @@ if __name__ == "__main__":
                         help="Max entries to load from the database (-1 = all)")
     parser.add_argument("--db_max_seq_len", type=int, default=512,
                         help="Pad/truncate database embeddings to this length")
+    parser.add_argument("--struct_max_db_entries", type=int, default=-1,
+                        help="Max entries to load from structure database (-1 = all)")
+    parser.add_argument("--struct_db_max_seq_len", type=int, default=512,
+                        help="Pad/truncate structure DB embeddings to this length")
+    parser.add_argument("--seq_weight", type=float, default=0.5,
+                        help="Initial weight for sequence-retrieval fusion path")
+    parser.add_argument("--struct_weight", type=float, default=0.5,
+                        help="Initial weight for structure-retrieval fusion path")
+    parser.add_argument(
+        "--retrieval_ablation",
+        type=str,
+        choices=["both", "seq_only", "struct_only"],
+        default="both",
+        help="Ablation mode for retrieval branches",
+    )
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate for retriever + fusion modules")
 
