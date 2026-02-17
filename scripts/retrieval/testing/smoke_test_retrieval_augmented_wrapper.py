@@ -6,7 +6,14 @@ module so you can validate retrieval/fusion wiring and gradient ownership
 without requiring full OpenFold runtime setup.
 """
 
+import sys
+from pathlib import Path
 from unittest.mock import patch
+
+# Allow running this file directly from any working directory.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 import torch.nn as nn
