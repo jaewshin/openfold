@@ -193,12 +193,21 @@ class CrossAttentionFusion(nn.Module):
         attn = torch.matmul(q, k.transpose(-1, -2)) / (d ** 0.5)  # [H, N_q, N_kv]
 
         if kv_mask is not None:
+            valid = kv_mask.bool()
+            if not valid.any():
+                # No valid KV tokens: return zero contribution for this retrieved item.
+                return torch.zeros_like(query)
             attn = attn.masked_fill(
-                ~kv_mask.bool().unsqueeze(0).unsqueeze(1),  # [1, 1, N_kv]
-                float("-inf"),
+                ~valid.unsqueeze(0).unsqueeze(1),  # [1, 1, N_kv]
+                -1e9,
             )
 
         attn = F.softmax(attn, dim=-1)
+        if kv_mask is not None:
+            # Keep masked positions at zero and renormalize valid positions.
+            valid = kv_mask.bool().unsqueeze(0).unsqueeze(1).to(attn.dtype)
+            attn = attn * valid
+            attn = attn / attn.sum(dim=-1, keepdim=True).clamp(min=1e-9)
         attn = self.dropout(attn)
 
         out = torch.matmul(attn, v)                       # [H, N_q, d]
