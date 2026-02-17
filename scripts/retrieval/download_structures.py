@@ -19,7 +19,6 @@ Pipeline:
 
 Output structure:
     output_dir/
-    ├── metadata.json            # full dataset metadata
     ├── splits.json              # train/val assignments with CATH info
     ├── train.fasta              # training sequences
     ├── val.fasta                # validation sequences

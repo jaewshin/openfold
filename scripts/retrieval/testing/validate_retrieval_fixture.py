@@ -5,7 +5,7 @@ Checks:
 - required files exist
 - FASTA IDs are unique
 - split membership matches splits.json
-- metadata/splits/FASTA IDs are mutually consistent
+- splits/FASTA IDs are mutually consistent
 - structure files exist (supports .cif and .cif.gz)
 """
 
@@ -67,13 +67,12 @@ def _gunzip_smoke(path: Path) -> None:
 
 
 def validate(dataset_dir: Path, fail_fast: bool = False) -> int:
-    metadata_path = dataset_dir / "metadata.json"
     splits_path = dataset_dir / "splits.json"
     train_fasta_path = dataset_dir / "train.fasta"
     val_fasta_path = dataset_dir / "val.fasta"
     structures_dir = dataset_dir / "structures"
 
-    required = [metadata_path, splits_path, train_fasta_path, val_fasta_path, structures_dir]
+    required = [splits_path, train_fasta_path, val_fasta_path, structures_dir]
     missing = [str(p) for p in required if not p.exists()]
     if missing:
         print("[ERROR] Missing required files/directories:")
@@ -81,7 +80,6 @@ def validate(dataset_dir: Path, fail_fast: bool = False) -> int:
             print(f"  - {m}")
         return 1
 
-    metadata = json.loads(metadata_path.read_text())
     splits = json.loads(splits_path.read_text())
     train_fasta = parse_fasta(train_fasta_path)
     val_fasta = parse_fasta(val_fasta_path)
@@ -94,8 +92,35 @@ def validate(dataset_dir: Path, fail_fast: bool = False) -> int:
         print(f"[ERROR] Train/val FASTA overlap ({len(overlap)}): {overlap[:10]}")
         return 1
 
-    split_train_ids = set(splits.get("train", []))
-    split_val_ids = set(splits.get("val", []))
+    split_train_ids = set()
+    split_val_ids = set()
+    if isinstance(splits, dict):
+        split_train_ids = set(splits.get("train", []))
+        split_val_ids = set(splits.get("val", []))
+    elif isinstance(splits, list):
+        for row in splits:
+            if not isinstance(row, dict):
+                continue
+            split = row.get("split")
+            if split not in {"train", "val"}:
+                continue
+            if "pdb_id" in row and "chain_id" in row:
+                sid = f"{row['pdb_id']}_{row['chain_id']}"
+            elif "id" in row:
+                sid = str(row["id"])
+            elif "sequence_id" in row:
+                sid = str(row["sequence_id"])
+            elif "domain_id" in row:
+                sid = str(row["domain_id"])
+            else:
+                continue
+            if split == "train":
+                split_train_ids.add(sid)
+            else:
+                split_val_ids.add(sid)
+    else:
+        print(f"[ERROR] Unsupported splits.json format: {type(splits).__name__}")
+        return 1
 
     errors = []
 
@@ -108,17 +133,7 @@ def validate(dataset_dir: Path, fail_fast: bool = False) -> int:
             f"val.fasta IDs ({len(val_ids)}) do not match splits.json val IDs ({len(split_val_ids)})"
         )
 
-    metadata_entries = metadata.get("entries", metadata.get("chains", []))
-    metadata_ids = set()
-    for e in metadata_entries:
-        sid = e.get("domain_id") or e.get("id") or e.get("sample_id")
-        if sid:
-            metadata_ids.add(sid)
-
     fasta_ids = train_ids | val_ids
-    if metadata_ids and not fasta_ids.issubset(metadata_ids):
-        only_fasta = sorted(fasta_ids - metadata_ids)
-        errors.append(f"FASTA contains IDs missing in metadata (count={len(only_fasta)}).")
 
     for sid, seq in {**train_fasta, **val_fasta}.items():
         if not seq:
