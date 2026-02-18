@@ -23,3 +23,8 @@ scopbenchmark/
 cath-domain-seqs.fa
 slurm_logs/
 pdb/
+
+# Vendored-repo cleanup: keep large/generated artifacts untracked
+results/
+figures/
+**/.ipynb_checkpoints/
