@@ -1,0 +1,27 @@
+[project]
+name = "tmvec2"
+version = "0.1.0"
+description = "Benchmarking suite and comparisons on popular datasets (CATH, SCOPe40) for TMVec-2 model family"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "biopython",
+    "faiss-cpu",
+    "huggingface-hub==0.36.0",
+    "lightning",
+    "lbster @ git+https://github.com/prescient-design/lobster.git",
+    "loguru",
+    "matplotlib",
+    "pandas",
+    "protobuf",
+    "pyarrow",
+    "scikit-learn",
+    "scipy",
+    "seaborn",
+    "sentencepiece",
+    "tmtools>=0.3.0",
+    "torch",
+    "tqdm",
+    "transformers<4.45",
+    "wandb",
+]

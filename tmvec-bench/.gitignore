@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+uv.lock
+
+# custom
+/data/scope40pdb-15k
+/data/scope40pdb
+/models
+/alignResults
+data/scop/
+scopbenchmark/
+/logs
+/binaries/foldseek
+/binaries/tm_vec_cath_model.ckpt
+cath-domain-seqs.fa
+slurm_logs/
+pdb/

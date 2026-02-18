@@ -1,0 +1,1 @@
+{"foldseek_binary":"\/scratch\/akeluska\/ismb_submission\/tmvec2\/binaries\/foldseek","structure_dir":"\/scratch\/akeluska\/tm-bench\/pdb","num_structures":100000,"threads":8,"sensitivity":null,"num_runs":3,"warmup_runs":1,"encoding_sizes":[10,100,1000,5000,10000,50000],"database_sizes":[1000,10000,100000],"query_sizes":[10,100,1000]}
