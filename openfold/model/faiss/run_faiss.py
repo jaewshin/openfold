@@ -271,6 +271,7 @@ class FAISSIndexBuilder:
         nprobe: int = 128,
         use_gpu: bool = True,
         train_size: int = 256_000,
+        normalize: bool = True,
     ):
         self.embed_dim = embed_dim
         self.index_type = index_type.upper()
@@ -280,14 +281,22 @@ class FAISSIndexBuilder:
         self.nprobe = nprobe
         self.use_gpu = use_gpu and torch.cuda.is_available()
         self.train_size = train_size
+        self.normalize = normalize
 
         self.gpu_resources = None
         self.index = None
 
         logger.info(
             f"FAISSIndexBuilder: type={self.index_type}, dim={embed_dim}, "
-            f"nlist={nlist}, pq_m={pq_m}, gpu={self.use_gpu}"
+            f"nlist={nlist}, pq_m={pq_m}, gpu={self.use_gpu}, normalize={self.normalize}"
         )
+
+    def _prepare_vectors(self, x: np.ndarray) -> np.ndarray:
+        """Ensure float32 contiguous layout and optional L2 normalization."""
+        out = np.ascontiguousarray(x.astype(np.float32, copy=False))
+        if self.normalize:
+            faiss.normalize_L2(out)
+        return out
 
     def _set_gpu_config(self, config):
         """Set common GPU config options."""
@@ -381,7 +390,7 @@ class FAISSIndexBuilder:
 
             indices = np.random.choice(n, size=n_sample, replace=False)
             # Load only the sampled rows into memory
-            sampled = mat[indices].astype(np.float32)
+            sampled = self._prepare_vectors(mat[indices].astype(np.float32))
             all_vectors.append(sampled)
             remaining -= n_sample
 
@@ -389,8 +398,9 @@ class FAISSIndexBuilder:
                 break
 
         train_set = np.concatenate(all_vectors, axis=0)[: self.train_size]
+        train_set = self._prepare_vectors(train_set)
         logger.info(f"Training set shape: {train_set.shape}")
-        return train_set.astype(np.float32)
+        return train_set
 
     def _train_index(self, train_set: np.ndarray):
         """Train the FAISS index."""
@@ -399,14 +409,11 @@ class FAISSIndexBuilder:
 
         if self.use_gpu:
             self.index = self._create_gpu_index()
-            # GPU training expects torch tensors
-            train_tensor = torch.from_numpy(train_set).float().contiguous()
-            if torch.cuda.is_available():
-                train_tensor = train_tensor.cuda()
-            self.index.train(train_tensor)
+            # Use NumPy for compatibility with FAISS Python wrappers.
+            self.index.train(self._prepare_vectors(train_set))
         else:
             self.index = self._create_cpu_index()
-            self.index.train(train_set)
+            self.index.train(self._prepare_vectors(train_set))
 
         elapsed = time.time() - t0
         logger.info(f"Index trained in {elapsed:.1f}s")
@@ -424,12 +431,10 @@ class FAISSIndexBuilder:
                 chunk_size = 100_000
                 for start in range(0, mat.shape[0], chunk_size):
                     end = min(start + chunk_size, mat.shape[0])
-                    chunk = torch.from_numpy(mat[start:end]).float().contiguous()
-                    if torch.cuda.is_available():
-                        chunk = chunk.cuda()
+                    chunk = self._prepare_vectors(mat[start:end])
                     self.index.add(chunk)
             else:
-                self.index.add(mat)
+                self.index.add(self._prepare_vectors(mat))
 
             total_added += mat.shape[0]
 
@@ -503,6 +508,7 @@ class FAISSIndexBuilder:
                     break
 
             train_set = np.concatenate(train_buffer)[: self.train_size].astype(np.float32)
+            train_set = self._prepare_vectors(train_set)
             del train_buffer
 
             self._train_index(train_set)
@@ -528,10 +534,9 @@ class FAISSIndexBuilder:
             embedder.embed_batches(data_loader), desc="Indexing", total=len(data_loader)
         ):
             if self.use_gpu:
-                vec = torch.from_numpy(embeddings).float().contiguous().cuda()
-                self.index.add(vec)
+                self.index.add(self._prepare_vectors(embeddings))
             else:
-                self.index.add(embeddings.astype(np.float32))
+                self.index.add(self._prepare_vectors(embeddings))
 
             all_labels.extend(labels)
             total_added += embeddings.shape[0]
@@ -644,6 +649,11 @@ Examples:
     idx_group.add_argument("--pq_bits", type=int, default=8, help="Bits per PQ code (IVFPQ only)")
     idx_group.add_argument("--nprobe", type=int, default=128, help="Number of clusters to search")
     idx_group.add_argument("--train_size", type=int, default=256000, help="Training set size")
+    idx_group.add_argument(
+        "--no_normalize",
+        action="store_true",
+        help="Disable L2 normalization before train/add (not recommended for cosine/IP retrieval)",
+    )
 
     # Pipeline options
     pipe_group = parser.add_argument_group("Pipeline options")
@@ -696,6 +706,7 @@ def main():
             nprobe=args.nprobe,
             use_gpu=use_gpu,
             train_size=args.train_size,
+            normalize=not args.no_normalize,
         )
         builder.build_streaming(embedder, str(args.fasta_file), str(args.index_file))
         return
@@ -753,6 +764,7 @@ def main():
         nprobe=args.nprobe,
         use_gpu=use_gpu,
         train_size=args.train_size,
+        normalize=not args.no_normalize,
     )
     builder.build_from_shards(shard_paths, str(args.index_file))
 

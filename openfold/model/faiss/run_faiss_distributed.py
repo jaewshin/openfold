@@ -680,13 +680,10 @@ class FAISSIndexBuilder:
 
         if self.use_gpu:
             self.index = self._create_gpu_index()
-            train_tensor = torch.from_numpy(train_set).float().contiguous()
-            if torch.cuda.is_available():
-                train_tensor = train_tensor.cuda()
-            self.index.train(train_tensor)
+            self.index.train(np.ascontiguousarray(train_set.astype(np.float32, copy=False)))
         else:
             self.index = self._create_cpu_index()
-            self.index.train(train_set)
+            self.index.train(np.ascontiguousarray(train_set.astype(np.float32, copy=False)))
 
         elapsed = time.time() - t0
         logger.info(f"Index trained in {elapsed:.1f}s")
@@ -703,12 +700,10 @@ class FAISSIndexBuilder:
                 chunk_size = 100_000
                 for start in range(0, mat.shape[0], chunk_size):
                     end = min(start + chunk_size, mat.shape[0])
-                    chunk = torch.from_numpy(mat[start:end]).float().contiguous()
-                    if torch.cuda.is_available():
-                        chunk = chunk.cuda()
+                    chunk = np.ascontiguousarray(mat[start:end].astype(np.float32, copy=False))
                     self.index.add(chunk)
             else:
-                self.index.add(mat)
+                self.index.add(np.ascontiguousarray(mat.astype(np.float32, copy=False)))
 
             total_added += mat.shape[0]
 
@@ -783,10 +778,9 @@ class FAISSIndexBuilder:
             embedder.embed_batches(data_loader), desc="Indexing", total=len(data_loader)
         ):
             if self.use_gpu:
-                vec = torch.from_numpy(embeddings).float().contiguous().cuda()
-                self.index.add(vec)
+                self.index.add(np.ascontiguousarray(embeddings.astype(np.float32, copy=False)))
             else:
-                self.index.add(embeddings.astype(np.float32))
+                self.index.add(np.ascontiguousarray(embeddings.astype(np.float32, copy=False)))
 
             all_labels.extend(labels)
             total_added += embeddings.shape[0]

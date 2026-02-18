@@ -5,7 +5,6 @@
 #SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH --time=5-00:00
-#SBATCH --dependency=afterok:7422922
 #SBATCH --output=/insomnia001/depts/pmg/users/js6118/openfold/logs/faiss_index_35M.out
 #SBATCH --error=/insomnia001/depts/pmg/users/js6118/openfold/logs/faiss_index_35M.err
 #SBATCH --no-requeue
@@ -22,11 +21,13 @@ echo "Faiss index will be saved to: /insomnia001/depts/pmg/users/js6118/data/uni
 python run_faiss.py \
     esm2_t12_35M_UR50D \
     /insomnia001/depts/pmg/users/js6118/data/uniref/uniref50/uniref50.fasta \
-    /insomnia001/depts/pmg/users/js6118/data/uniref/uniref50/index/esm2_35M.index \
+    /insomnia001/depts/pmg/users/js6118/data/uniref/uniref50/index/u50_esm2_35M.index \
     --index_only \
-    --embeddings_dir /insomnia001/depts/pmg/users/js6118/data/uniref/uniref50/embeddings/esm2_35M_backup \
+    --embeddings_dir /insomnia001/depts/pmg/users/js6118/data/uniref/uniref50/embeddings/esm2_35M_parallel_jobs/merged \
     --index_type IVFPQ \
     --nlist 65536 \
     --pq_m 32 \
-    --train_size 5000000
+    --pq_bits 8 \
+    --train_size 2000000 \
+    --nprobe 128
 echo "Finished Faiss index generation for ESM-2 35M embeddings on UniRef50 dataset"
