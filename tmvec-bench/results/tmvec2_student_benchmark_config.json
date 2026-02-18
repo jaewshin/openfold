@@ -1,1 +1,0 @@
-{"device":"cuda:0","max_length":600,"batch_size":128,"num_runs":3,"warmup_runs":1,"encoding_sizes":[10,100,1000,5000,10000,50000],"database_sizes":[1000,10000,100000],"query_sizes":[10,100,1000]}
