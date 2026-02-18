@@ -34,8 +34,11 @@ Set your downloaded dataset path once, then run all checks:
 DATASET_DIR=/absolute/path/to/rag_data
 
 python scripts/retrieval/testing/validate_retrieval_fixture.py --dataset_dir "$DATASET_DIR"
+python scripts/retrieval/testing/test_retrieval_data_parser.py
+python scripts/retrieval/testing/test_packed_retrieval_dataset.py
 python scripts/retrieval/testing/test_retrieval_fusion_modules.py
 python scripts/retrieval/testing/smoke_test_retrieval_augmented_wrapper.py
+python scripts/retrieval/testing/test_train_retrieval_lightning.py
 ```
 
 ## 1) Validate dataset fixture
@@ -74,7 +77,20 @@ Validates:
 - `top_k > M` behavior
 - `CrossAttentionFusion` finite output and gate sensitivity
 
-## 3) Wrapper smoke test with manual retrieval
+## 3) Data parser tests
+
+Command:
+
+```bash
+python scripts/retrieval/testing/test_retrieval_data_parser.py
+```
+
+Validates:
+
+- `download_structures.py`-style fixture parsing into a normalized manifest
+- JSONL manifest read/write roundtrip
+
+## 4) Wrapper smoke test with manual retrieval
 
 Command:
 
@@ -89,8 +105,39 @@ This patches in a lightweight fake AlphaFold backbone and checks:
 - gradients flow to retriever/fusion
 - frozen OpenFold backbone remains gradient-free
 
+## 5) Packed dataset format tests
+
+Command:
+
+```bash
+python scripts/retrieval/testing/test_packed_retrieval_dataset.py
+```
+
+Validates:
+
+- sharded packed feature writing
+- packed split loading with lazy shard cache
+- packed dataset integration with `RetrievalDataModule`
+
+## 6) Lightning training smoke test
+
+Command:
+
+```bash
+python scripts/retrieval/testing/test_train_retrieval_lightning.py
+```
+
+Validates:
+
+- retrieval-augmented Lightning `training_step` computes a loss
+- optimizer step updates trainable retrieval/fusion parameters
+- fake backbone + fake loss wiring for low-memory CI smoke checks
+
 ## Suggested order
 
 1. Run fixture validation.
-2. Run module-level tests.
-3. Run wrapper smoke test.
+2. Run parser tests.
+3. Run packed dataset tests.
+4. Run module-level tests.
+5. Run wrapper smoke test.
+6. Run Lightning training smoke test.
