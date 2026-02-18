@@ -24,6 +24,7 @@ class FakeBackbone(nn.Module):
     def __init__(self, _config):
         super().__init__()
         self.scale = nn.Parameter(torch.tensor(1.0))
+        self.last_batch = None
         self.input_embedder = nn.Linear(1, 1)
         self.recycling_embedder = nn.Linear(1, 1)
         self.template_embedder = nn.Linear(1, 1)
@@ -34,6 +35,7 @@ class FakeBackbone(nn.Module):
         self.aux_heads = nn.Linear(1, 1)
 
     def forward(self, batch):
+        self.last_batch = batch
         x = batch["seq_embedding"]
         smoke = (x * self.scale).pow(2).mean()
         return {
@@ -423,6 +425,51 @@ def test_gradients_propagate_to_both_query_retrievers_rawseq():
     optimizer.step()
 
 
+def test_retrieval_injection_stages_pre_evoformer_and_pre_structure():
+    torch.manual_seed(0)
+    model = RetrievalAugmentedLightningModule(
+        config_preset="seqemb_initial_training",
+        seq_embedding_dim=32,
+        top_k=3,
+        lr=1e-2,
+        struct_index_path=None,
+        struct_index_dim=16,
+        seq_index_path=None,
+        seq_index_dim=32,
+        retrieval_ablation="struct_only",
+        retrieval_pipeline="legacy",
+        retrieval_injection_stages=("pre_evoformer", "pre_structure"),
+        backbone_factory=FakeBackbone,
+        loss_factory=FakeLoss,
+    )
+    model.struct_retriever = FakeRetriever(dim=16)
+    model.log = lambda *args, **kwargs: None
+
+    batch = {
+        "seq_embedding": torch.randn(2, 5, 32, 2, requires_grad=True),
+        "seq_mask": torch.ones(2, 5, 2),
+    }
+
+    _ = model(batch)
+    if model.openfold.last_batch is None:
+        raise AssertionError("FakeBackbone did not receive batch")
+
+    model_batch = model.openfold.last_batch
+    if "retrieval_pre_evoformer" not in model_batch:
+        raise AssertionError("Missing retrieval_pre_evoformer in model batch")
+    if "retrieval_pre_structure" not in model_batch:
+        raise AssertionError("Missing retrieval_pre_structure in model batch")
+
+    if model_batch["retrieval_pre_evoformer"].shape != (2, 5, model.c_m, 2):
+        raise AssertionError("Unexpected retrieval_pre_evoformer shape")
+    if model_batch["retrieval_pre_structure"].shape != (2, 5, model.c_s, 2):
+        raise AssertionError("Unexpected retrieval_pre_structure shape")
+
+    # Without 'input' stage, seq_embedding fed to OpenFold should remain unchanged.
+    if not torch.allclose(model_batch["seq_embedding"], batch["seq_embedding"]):
+        raise AssertionError("seq_embedding should remain unchanged when input injection is disabled")
+
+
 def test_pipeline_end_to_end_lightning_fit_smoke():
     torch.manual_seed(0)
     pl.seed_everything(0, workers=True)
@@ -475,6 +522,7 @@ def main():
     test_rawseq_pipeline_runs_with_fake_sequence_backends()
     test_gradients_propagate_to_both_query_retrievers_embed_project()
     test_gradients_propagate_to_both_query_retrievers_rawseq()
+    test_retrieval_injection_stages_pre_evoformer_and_pre_structure()
     test_pipeline_end_to_end_lightning_fit_smoke()
     test_pipeline_end_to_end_lightning_fit_smoke_rawseq()
     print("[OK] retrieval lightning module tests passed")

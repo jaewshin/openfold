@@ -410,6 +410,18 @@ class AlphaFold(nn.Module):
                     _mask_trans=self.config._mask_trans,
                 )
 
+        # Optional retrieval-conditioned update hook before Evoformer.
+        # Expected shape: [*, N_res, C_m], applied to the first sequence row.
+        if "retrieval_pre_evoformer" in feats:
+            delta_m = feats["retrieval_pre_evoformer"].to(device=m.device, dtype=m.dtype)
+            target_shape = m[..., 0, :, :].shape
+            if delta_m.shape != target_shape:
+                raise ValueError(
+                    "retrieval_pre_evoformer shape mismatch: "
+                    f"got={tuple(delta_m.shape)} expected={tuple(target_shape)}"
+                )
+            m[..., 0, :, :] = add(m[..., 0, :, :], delta_m, inplace=inplace_safe)
+
         # Run MSA + pair embeddings through the trunk of the network
         # m: [*, S, N, C_m]
         # z: [*, N, N, C_z]
@@ -451,6 +463,18 @@ class AlphaFold(nn.Module):
         outputs["single"] = s
 
         del z
+
+        # Optional retrieval-conditioned update hook before StructureModule.
+        # Expected shape: [*, N_res, C_s].
+        if "retrieval_pre_structure" in feats:
+            delta_s = feats["retrieval_pre_structure"].to(device=s.device, dtype=s.dtype)
+            if delta_s.shape != s.shape:
+                raise ValueError(
+                    "retrieval_pre_structure shape mismatch: "
+                    f"got={tuple(delta_s.shape)} expected={tuple(s.shape)}"
+                )
+            s = add(s, delta_s, inplace=inplace_safe)
+            outputs["single"] = s
 
         # Predict 3D structure
         outputs["sm"] = self.structure_module(

@@ -432,6 +432,7 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         fusion_dropout: float = 0.0,
         retrieval_ablation: str = "both",
         retrieval_pipeline: str = "legacy",
+        retrieval_injection_stages: Sequence[str] = ("input",),
         retriever_esm2_model_name: str = "esm2_t12_35M_UR50D",
         retriever_esm2_repr_layer: int = 12,
         retriever_esm2_max_len: int = 1022,
@@ -473,6 +474,20 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         self.lr = lr
         self.retrieval_ablation = retrieval_ablation
         self.retrieval_pipeline = retrieval_pipeline
+        stage_values = {str(s).strip().lower() for s in retrieval_injection_stages if str(s).strip()}
+        if not stage_values:
+            stage_values = {"input"}
+        valid_stages = {"input", "pre_evoformer", "pre_structure"}
+        invalid_stages = sorted(stage_values - valid_stages)
+        if invalid_stages:
+            raise ValueError(
+                "Unsupported retrieval injection stage(s): "
+                f"{invalid_stages}. Expected subset of {sorted(valid_stages)}."
+            )
+        self.retrieval_injection_stages = tuple(sorted(stage_values))
+        self.inject_input_embedding = "input" in stage_values
+        self.inject_pre_evoformer = "pre_evoformer" in stage_values
+        self.inject_pre_structure = "pre_structure" in stage_values
         self.freeze_backbone = freeze_backbone
         self.train_openfold_all = train_openfold_all
         requested_modules: Set[str] = set()
@@ -520,6 +535,8 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         # Template-free for this retrieval fixture (no alignment/template dependency).
         self.config.model.template.enabled = False
         self.config.data.common.use_templates = False
+        self.c_m = int(self.config.model.evoformer_stack.c_m)
+        self.c_s = int(self.config.model.evoformer_stack.c_s)
 
         if backbone_factory is None:
             self.openfold = AlphaFold(self.config)
@@ -609,6 +626,16 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
             dropout=fusion_dropout,
         )
         self.source_mix_logits = nn.Parameter(torch.zeros(2))
+        self.pre_evoformer_proj = (
+            nn.Linear(seq_embedding_dim, self.c_m) if self.inject_pre_evoformer else None
+        )
+        self.pre_structure_proj = (
+            nn.Linear(seq_embedding_dim, self.c_s) if self.inject_pre_structure else None
+        )
+        logger.info(
+            "Retrieval injection stages enabled: %s",
+            ",".join(self.retrieval_injection_stages),
+        )
 
         # Backward-compatible legacy query projectors.
         # New pipelines use explicit trainable query encoders below.
@@ -1031,7 +1058,20 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         fused_batch = torch.stack(fused_list, dim=0)  # [B, N, D]
         num_recycles = tensor_batch["seq_embedding"].shape[-1]
         model_batch = dict(tensor_batch)
-        model_batch["seq_embedding"] = fused_batch.unsqueeze(-1).expand(*fused_batch.shape, num_recycles)
+        if self.inject_input_embedding:
+            model_batch["seq_embedding"] = fused_batch.unsqueeze(-1).expand(*fused_batch.shape, num_recycles)
+        if self.inject_pre_evoformer:
+            if self.pre_evoformer_proj is None:
+                raise RuntimeError("inject_pre_evoformer=True but pre_evoformer_proj is not initialized")
+            pre_evo = self.pre_evoformer_proj(fused_batch)
+            model_batch["retrieval_pre_evoformer"] = pre_evo.unsqueeze(-1).expand(*pre_evo.shape, num_recycles)
+        if self.inject_pre_structure:
+            if self.pre_structure_proj is None:
+                raise RuntimeError("inject_pre_structure=True but pre_structure_proj is not initialized")
+            pre_structure = self.pre_structure_proj(fused_batch)
+            model_batch["retrieval_pre_structure"] = pre_structure.unsqueeze(-1).expand(
+                *pre_structure.shape, num_recycles
+            )
 
         outputs = self.openfold(model_batch)
         outputs["seq_retrieval_scores"] = torch.stack(seq_scores_list, dim=0).detach()
@@ -1173,6 +1213,18 @@ def main():
             "legacy: pooled seq_embedding -> linear query projection (previous behavior); "
             "embed_project: explicit trainable ESM2/TMVec query encoders + reconstructed vectors projected to 1280; "
             "rawseq_esm1b: explicit trainable ESM2/TMVec query encoders + retrieved raw sequences embedded by frozen ESM1b."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval_injection_stages",
+        nargs="+",
+        choices=["input", "pre_evoformer", "pre_structure"],
+        default=["input"],
+        help=(
+            "Where to inject retrieval-conditioned updates. "
+            "'input' replaces seq_embedding before OpenFold input embedder (current default); "
+            "'pre_evoformer' injects an additive update to m[...,0,:,:] before Evoformer; "
+            "'pre_structure' injects an additive update to single representation s before StructureModule."
         ),
     )
     parser.add_argument("--retriever_esm2_model_name", type=str, default="esm2_t12_35M_UR50D")
@@ -1368,6 +1420,7 @@ def main():
         fusion_dropout=args.fusion_dropout,
         retrieval_ablation=args.retrieval_ablation,
         retrieval_pipeline=args.retrieval_pipeline,
+        retrieval_injection_stages=args.retrieval_injection_stages,
         retriever_esm2_model_name=args.retriever_esm2_model_name,
         retriever_esm2_repr_layer=args.retriever_esm2_repr_layer,
         retriever_esm2_max_len=args.retriever_esm2_max_len,
