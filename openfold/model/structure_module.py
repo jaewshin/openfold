@@ -432,16 +432,27 @@ class InvariantPointAttention(nn.Module):
         # [*, H, N_res, N_res]
         pt_att = permute_final_dims(pt_att, (2, 0, 1))
 
-        if (inplace_safe):
+        # This custom kernel is only reliable on CUDA (non-ROCm) builds.
+        use_inplace_softmax_kernel = (
+            inplace_safe
+            and a.is_cuda
+            and getattr(torch.version, "hip", None) is None
+        )
+        if use_inplace_softmax_kernel:
             a += pt_att
             del pt_att
             a += square_mask.unsqueeze(-3)
-            # in-place softmax
+            # in-place softmax kernel currently supports CUDA tensors only.
             attn_core_inplace_cuda.forward_(
                 a,
                 reduce(mul, a.shape[:-1]),
                 a.shape[-1],
             )
+        elif (inplace_safe):
+            a += pt_att
+            del pt_att
+            a += square_mask.unsqueeze(-3)
+            a = self.softmax(a)
         else:
             a = a + pt_att
             a = a + square_mask.unsqueeze(-3)

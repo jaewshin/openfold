@@ -33,6 +33,8 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pytorch_lightning.callbacks import ModelCheckpoint
+from lightning_fabric.plugins.environments import LightningEnvironment
 
 from openfold.config import model_config
 from openfold.model.model import AlphaFold
@@ -43,6 +45,45 @@ from openfold.utils.tensor_utils import tensor_tree_map
 from scripts.retrieval.retrieval_data import RetrievalDataModule, build_manifest, write_manifest_jsonl
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_resume_checkpoint_path(args) -> Optional[str]:
+    """Resolve checkpoint path for trainer resume, if requested."""
+    if args.resume_ckpt_path:
+        ckpt_path = Path(args.resume_ckpt_path).expanduser().resolve()
+        if not ckpt_path.is_file():
+            raise SystemExit(f"--resume_ckpt_path does not exist: {ckpt_path}")
+        return str(ckpt_path)
+
+    if not args.auto_resume:
+        return None
+
+    checkpoint_dir = args.checkpoint_dir or (args.output_dir / "checkpoints")
+    checkpoint_dir = checkpoint_dir.expanduser().resolve()
+    last_ckpt = checkpoint_dir / "last.ckpt"
+    if last_ckpt.is_file():
+        return str(last_ckpt)
+
+    if not checkpoint_dir.is_dir():
+        logger.info(
+            "Auto-resume requested, but checkpoint directory does not exist: %s. Starting from scratch.",
+            checkpoint_dir,
+        )
+        return None
+
+    candidates = sorted(
+        checkpoint_dir.glob("*.ckpt"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        logger.info(
+            "Auto-resume requested, but no checkpoints found under %s. Starting from scratch.",
+            checkpoint_dir,
+        )
+        return None
+
+    return str(candidates[0])
 
 
 class LazyFaissRetriever:
@@ -1041,7 +1082,17 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         outputs["retrieval_source_weights"] = torch.softmax(self.source_mix_logits, dim=0).detach()
         return outputs
 
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+    def training_step(self, batch: Optional[Dict[str, torch.Tensor]], batch_idx: int):
+        if batch is None:
+            self.log(
+                "train/skipped_invalid_batch",
+                1.0,
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                batch_size=1,
+            )
+            return None
         outputs = self(batch)
         tensor_batch = {k: v for k, v in batch.items() if torch.is_tensor(v)}
         labels = tensor_tree_map(lambda t: t[..., -1], tensor_batch)
@@ -1063,7 +1114,18 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         self.log("train/source_struct_weight", outputs["retrieval_source_weights"][1], on_step=True, on_epoch=False)
         return loss
 
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+    def validation_step(self, batch: Optional[Dict[str, torch.Tensor]], batch_idx: int):
+        if batch is None:
+            self.log(
+                "val/skipped_invalid_batch",
+                1.0,
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+                sync_dist=False,
+                batch_size=1,
+            )
+            return None
         outputs = self(batch)
         tensor_batch = {k: v for k, v in batch.items() if torch.is_tensor(v)}
         labels = tensor_tree_map(lambda t: t[..., -1], tensor_batch)
@@ -1261,8 +1323,43 @@ def main():
     )
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--precision", type=str, default="32")
+    parser.add_argument(
+        "--max_time",
+        type=str,
+        default=None,
+        help="Optional PL max_time (e.g., '00:23:50:00') for graceful stop before walltime.",
+    )
     parser.add_argument("--max_recycling_iters", type=int, default=0)
     parser.add_argument("--strict_seq_embeddings", action="store_true")
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=Path,
+        default=None,
+        help="Checkpoint directory (default: <output_dir>/checkpoints).",
+    )
+    parser.add_argument(
+        "--checkpoint_every_n_train_steps",
+        type=int,
+        default=1000,
+        help="Save checkpoints every N train steps. Set 0 to disable step checkpoints.",
+    )
+    parser.add_argument(
+        "--save_last_checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to maintain last.ckpt in checkpoint_dir.",
+    )
+    parser.add_argument(
+        "--resume_ckpt_path",
+        type=str,
+        default=None,
+        help="Explicit Lightning checkpoint path for resume (restores model/optimizer/scheduler/global_step).",
+    )
+    parser.add_argument(
+        "--auto_resume",
+        action="store_true",
+        help="Resume from checkpoint_dir/last.ckpt or newest *.ckpt if available.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=Path, default=Path("./outputs/retrieval_lightning"))
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
@@ -1303,6 +1400,8 @@ def main():
         raise SystemExit("--devices must be >= 1")
     if args.val_check_interval < 1:
         raise SystemExit("--val_check_interval must be >= 1")
+    if args.checkpoint_every_n_train_steps < 0:
+        raise SystemExit("--checkpoint_every_n_train_steps must be >= 0")
 
     effective_batch_size = args.batch_size * args.accumulate_grad_batches * args.devices
     logger.info(
@@ -1397,21 +1496,53 @@ def main():
         train_aux_heads=args.train_aux_heads,
     )
 
+    args.output_dir = args.output_dir.expanduser().resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = (args.checkpoint_dir or (args.output_dir / "checkpoints")).expanduser().resolve()
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    args.checkpoint_dir = checkpoint_dir
+
+    if args.resume_ckpt_path and args.auto_resume:
+        logger.info(
+            "Both --resume_ckpt_path and --auto_resume were provided; explicit --resume_ckpt_path takes precedence."
+        )
+    resume_ckpt_path = _resolve_resume_checkpoint_path(args)
+    if resume_ckpt_path:
+        logger.info("Resuming training from checkpoint: %s", resume_ckpt_path)
+    else:
+        logger.info("Starting training from scratch (no resume checkpoint selected).")
+
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=str(checkpoint_dir),
+        filename="step{step:09d}",
+        monitor=None,
+        save_last=args.save_last_checkpoint,
+        save_top_k=-1,
+        mode="max",
+        auto_insert_metric_name=False,
+        every_n_train_steps=(args.checkpoint_every_n_train_steps if args.checkpoint_every_n_train_steps > 0 else None),
+        every_n_epochs=(1 if args.checkpoint_every_n_train_steps == 0 else None),
+        save_on_train_epoch_end=(args.checkpoint_every_n_train_steps == 0),
+        save_on_exception=True,
+    )
+
     trainer_logger = _build_trainer_logger(args, args.output_dir)
     trainer = pl.Trainer(
         default_root_dir=str(args.output_dir),
         logger=trainer_logger,
+        callbacks=[checkpoint_callback],
+        plugins=[LightningEnvironment()],
         accelerator=_auto_accelerator(),
         devices=args.devices,
         precision=args.precision,
         max_epochs=args.max_epochs,
+        max_time=args.max_time,
         val_check_interval=args.val_check_interval,
         accumulate_grad_batches=args.accumulate_grad_batches,
         log_every_n_steps=1,
         num_sanity_val_steps=0,
     )
-    trainer.fit(model, datamodule=data_module)
+    trainer.fit(model, datamodule=data_module, ckpt_path=resume_ckpt_path)
 
 
 if __name__ == "__main__":

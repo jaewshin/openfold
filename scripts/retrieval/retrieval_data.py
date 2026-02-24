@@ -249,6 +249,8 @@ class RetrievalStructureDataset(Dataset):
         rng = np.random.default_rng(0)
         self._fallback_aa_table = rng.standard_normal((21, seq_embedding_dim)).astype(np.float32) * 0.05
         self._aa_vocab = {aa: i for i, aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
+        self._invalid_warn_count = 0
+        self._invalid_warn_limit = 16
 
     def __len__(self) -> int:
         return len(self.records)
@@ -343,7 +345,34 @@ class RetrievalStructureDataset(Dataset):
             )
         return self._fallback_seq_embedding(record.sequence)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def _validate_processed_features(
+        self, record: TrainingRecord, feats: Dict[str, object]
+    ) -> Optional[str]:
+        all_atom_mask = feats.get("all_atom_mask")
+        all_atom_positions = feats.get("all_atom_positions")
+        if not torch.is_tensor(all_atom_mask) or not torch.is_tensor(all_atom_positions):
+            return "missing_all_atom_tensors"
+        if not torch.isfinite(all_atom_mask).all():
+            return "non_finite_all_atom_mask"
+        if not torch.isfinite(all_atom_positions).all():
+            return "non_finite_all_atom_positions"
+
+        mask_sum = float(all_atom_mask.sum().item())
+        if mask_sum <= 0.0:
+            return "empty_all_atom_mask"
+
+        ca_pos = residue_constants.atom_order["CA"]
+        if all_atom_mask.ndim >= 3:
+            ca_mask = all_atom_mask[..., ca_pos, :]
+        else:
+            ca_mask = all_atom_mask[..., ca_pos]
+        ca_sum = float(ca_mask.sum().item())
+        if ca_sum <= 0.0:
+            return "empty_ca_mask"
+
+        return None
+
+    def __getitem__(self, idx: int) -> Optional[Dict[str, torch.Tensor]]:
         record = self.records[idx]
         path = Path(record.structure_path)
 
@@ -378,11 +407,29 @@ class RetrievalStructureDataset(Dataset):
         feats["raw_sequence"] = record.sequence
         feats["sequence_id"] = record.sequence_id
 
+        invalid_reason = self._validate_processed_features(record, feats)
+        if invalid_reason is not None:
+            if self._invalid_warn_count < self._invalid_warn_limit:
+                logger.warning(
+                    "Skipping invalid sample %s (split=%s reason=%s path=%s)",
+                    record.sequence_id,
+                    record.split,
+                    invalid_reason,
+                    record.structure_path,
+                )
+            self._invalid_warn_count += 1
+            return None
+
         return feats
 
 
-def collate_feature_dicts(samples: Sequence[Dict[str, object]]) -> Dict[str, object]:
+def collate_feature_dicts(
+    samples: Sequence[Optional[Dict[str, object]]]
+) -> Optional[Dict[str, object]]:
     """Collate tensors by stacking and keep metadata as lists."""
+    samples = [s for s in samples if s is not None]
+    if not samples:
+        return None
     out: Dict[str, object] = {}
     keys = samples[0].keys()
     for k in keys:
@@ -433,9 +480,13 @@ def pack_dataset_split(
     chunk: List[Dict[str, torch.Tensor]] = []
     chunk_ids: List[str] = []
     total = 0
+    skipped = 0
 
     for i in range(len(dataset)):
         sample = dataset[i]
+        if sample is None:
+            skipped += 1
+            continue
         tensor_sample = {k: v for k, v in sample.items() if torch.is_tensor(v)}
         chunk.append(tensor_sample)
         chunk_ids.append(records[i].sequence_id)
@@ -451,7 +502,12 @@ def pack_dataset_split(
         shards.append(_flush_packed_shard(shard_path, chunk, chunk_ids, float16_storage=float16_storage))
         total += len(chunk)
 
-    metadata = {"num_samples": total, "num_shards": len(shards), "shards": shards}
+    metadata = {
+        "num_samples": total,
+        "num_skipped": skipped,
+        "num_shards": len(shards),
+        "shards": shards,
+    }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
     return metadata
 
