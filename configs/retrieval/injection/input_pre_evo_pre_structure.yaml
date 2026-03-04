@@ -1,0 +1,3 @@
+retrieval:
+  injection:
+    stages: [input, pre_evoformer, pre_structure]

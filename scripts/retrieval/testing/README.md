@@ -39,6 +39,7 @@ python scripts/retrieval/testing/test_packed_retrieval_dataset.py
 python scripts/retrieval/testing/test_retrieval_fusion_modules.py
 python scripts/retrieval/testing/smoke_test_retrieval_augmented_wrapper.py
 python scripts/retrieval/testing/test_train_retrieval_lightning.py
+python scripts/retrieval/testing/test_retrieval_modular_framework.py
 ```
 
 ## 1) Validate dataset fixture
@@ -132,6 +133,22 @@ Validates:
 - retrieval-augmented Lightning `training_step` computes a loss
 - optimizer step updates trainable retrieval/fusion parameters
 - fake backbone + fake loss wiring for low-memory CI smoke checks
+
+## 7) Modular retrieval framework tests
+
+Command:
+
+```bash
+python scripts/retrieval/testing/test_retrieval_modular_framework.py
+```
+
+Validates:
+
+- fusion registry resolution and unknown-name errors
+- `simple_cross_attn` and `rag_esm_inspired` fusion shape/gradient behavior
+- multi-stage retrieval injection tensor wiring
+- source-mixing controller wiring and gradient flow
+- embed-project modular Lightning wiring with fake encoders/retrievers
 
 ## Suggested order
 

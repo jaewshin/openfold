@@ -1,0 +1,2 @@
+retrieval:
+  pipeline: embed_project

@@ -34,7 +34,13 @@ from pytorch_lightning.utilities.deepspeed import (
     convert_zero_checkpoint_to_fp32_state_dict
 )
 
-from .tensorrt_utils import instrument_with_trt_compile
+_TRT_IMPORT_ERROR = None
+try:
+    from .tensorrt_utils import instrument_with_trt_compile
+except Exception as exc:  # pragma: no cover - optional dependency path
+    instrument_with_trt_compile = None
+    _TRT_IMPORT_ERROR = exc
+
 from .precision_utils import wrap_for_precision
 
 logging.basicConfig()
@@ -69,6 +75,10 @@ def make_output_directory(output_dir, model_name, multiple_model_mode):
 
 def _accelerate(model, config):
     if config.trt.mode is not None:
+        if instrument_with_trt_compile is None:
+            raise ImportError(
+                "TensorRT mode was requested, but TensorRT dependencies are missing."
+            ) from _TRT_IMPORT_ERROR
         instrument_with_trt_compile(model, config)
     if config.precision is not None and config.precision in ['bf16', 'fp16']:
         model.evoformer = wrap_for_precision(model.evoformer, config.precision)

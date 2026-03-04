@@ -1760,7 +1760,8 @@ class AlphaFoldLoss(nn.Module):
         for loss_name, loss_fn in loss_fns.items():
             weight = self.config[loss_name].weight
             loss = loss_fn()
-            if torch.isnan(loss) or torch.isinf(loss):
+            loss_was_nan = bool(torch.isnan(loss) or torch.isinf(loss))
+            if loss_was_nan:
                 # for k,v in batch.items():
                 #    if torch.any(torch.isnan(v)) or torch.any(torch.isinf(v)):
                 #        logging.warning(f"{k}: is nan")
@@ -1769,6 +1770,7 @@ class AlphaFoldLoss(nn.Module):
                 loss = loss.new_tensor(0., requires_grad=True)
             cum_loss = cum_loss + weight * loss
             losses[loss_name] = loss.detach().clone()
+            losses[f"{loss_name}_nan_skipped"] = loss.new_tensor(float(loss_was_nan)).detach().clone()
         losses["unscaled_loss"] = cum_loss.detach().clone()
 
         # Scale the loss by the square root of the minimum of the crop size and

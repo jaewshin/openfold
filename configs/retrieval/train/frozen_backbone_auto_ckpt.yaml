@@ -1,0 +1,5 @@
+model:
+  freeze_backbone: true
+  train_openfold_all: false
+  trainable_backbone_modules: []
+  openfold_checkpoint: auto

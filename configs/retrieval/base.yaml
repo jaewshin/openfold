@@ -1,0 +1,81 @@
+defaults:
+  - fusion/simple_cross_attn.yaml
+  - injection/input_only.yaml
+  - pipeline/legacy.yaml
+  - train/frozen_backbone.yaml
+
+model:
+  config_preset: seqemb_initial_training
+  openfold_checkpoint: null
+  openfold_checkpoint_search_globs:
+    - outputs/**/*.ckpt
+    - checkpoints/**/*.ckpt
+    - logs/**/*.ckpt
+  auto_disable_resolution_gated_losses: true
+  resolution_gated_loss_warmup_steps: 128
+  low_prec: false
+
+retrieval:
+  seq_embedding_dim: 1280
+  top_k: 8
+  nprobe: 64
+  ablation: both
+  sources:
+    seq:
+      index_path: null
+      index_dim: 1280
+    struct:
+      index_path: null
+      index_dim: 512
+  embed_project:
+    retriever_esm2_model_name: esm2_t12_35M_UR50D
+    retriever_esm2_repr_layer: 12
+    retriever_esm2_max_len: 1022
+    retriever_tmvec_checkpoint: null
+    retriever_tmvec_max_len: 1022
+    retriever_normalize_queries: true
+
+data:
+  packed_dataset_dir: null
+  dataset_dir: null
+  manifest_path: null
+  write_manifest_to: null
+  seq_embedding_dir: null
+  config_preset: seqemb_initial_training
+  batch_size: 1
+  num_workers: 5
+  disable_templates: true
+  max_recycling_iters: 0
+  strict_seq_embeddings: false
+
+optimizer:
+  lr: 1.0e-4
+  controller_lr: null
+  backbone_lr: null
+
+train:
+  seed: 42
+
+trainer:
+  output_dir: ./outputs/retrieval_modular
+  accelerator: auto
+  devices: 1
+  precision: "32"
+  max_epochs: 1
+  val_check_interval: 1000
+  accumulate_grad_batches: 1
+  num_sanity_val_steps: 0
+  log_every_n_steps: 25
+  enable_checkpointing: true
+
+wandb:
+  enabled: false
+  project: openfold-retrieval
+  entity: jshin
+  run_name: null
+  run_id: null
+  resume: allow
+  api_key_env: WANDB_API_KEY
+  api_key: null
+  offline: false
+  tags: null

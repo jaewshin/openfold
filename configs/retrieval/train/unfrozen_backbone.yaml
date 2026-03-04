@@ -1,0 +1,4 @@
+model:
+  freeze_backbone: false
+  train_openfold_all: true
+  trainable_backbone_modules: []

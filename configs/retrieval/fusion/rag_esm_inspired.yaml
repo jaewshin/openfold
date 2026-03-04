@@ -1,0 +1,7 @@
+retrieval:
+  fusion:
+    name: rag_esm_inspired
+    params:
+      num_heads: 8
+      dropout: 0.0
+      mlp_hidden_mult: 2
