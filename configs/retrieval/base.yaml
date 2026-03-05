@@ -14,6 +14,7 @@ model:
   auto_disable_resolution_gated_losses: true
   resolution_gated_loss_warmup_steps: 128
   low_prec: false
+  use_flash: false
 
 retrieval:
   seq_embedding_dim: 1280
@@ -34,6 +35,22 @@ retrieval:
     retriever_tmvec_checkpoint: null
     retriever_tmvec_max_len: 1022
     retriever_normalize_queries: true
+  rawseq_esm1b:
+    seq_index_ids_path: null
+    seq_db_fasta_path: null
+    seq_db_fasta_index_db: null
+    esm1b_model_name: esm1b_t33_650M_UR50S
+    esm1b_repr_layer: 33
+    esm1b_max_len: 1022
+    backend: fair_esm
+    use_pretrained: true
+    compute_dtype: bfloat16
+    esm1b_tuning_mode: lora
+    lora_rank: 8
+    lora_alpha: 16.0
+    lora_dropout: 0.0
+    lora_target_modules: [self_attn.q_proj, self_attn.v_proj, self_attn.out_proj, fc1, fc2]
+    train_layer_norm: false
 
 data:
   packed_dataset_dir: null

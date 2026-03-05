@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import importlib.util
 from typing import Callable, Dict, Optional, Sequence, Set
 
 import pytorch_lightning as pl
@@ -14,13 +15,17 @@ from openfold.utils.tensor_utils import tensor_tree_map
 
 # Register built-in fusion strategies.
 from . import fusion_rag_esm_inspired as _fusion_rag_esm_inspired  # noqa: F401
+from . import fusion_rag_esm_port as _fusion_rag_esm_port  # noqa: F401
 from . import fusion_simple_cross_attn as _fusion_simple_cross_attn  # noqa: F401
+from .context_esm1b import ESM1bContextEncoder
 from .controller import RetrievalController
 from .injection import RetrievalInjectionPlan
 from .pipeline_embed_project import EmbedProjectQueryPipeline
 from .pipeline_legacy import LegacyQueryPipeline
+from .row_id_lookup import RowIdLookup
 from .registry import build_fusion
 from .retriever import LazyFaissRetriever
+from .sequence_store import FastaSequenceStore
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,27 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         retriever_tmvec_checkpoint: Optional[str] = None,
         retriever_tmvec_max_len: int = 1022,
         retriever_normalize_queries: bool = True,
+        rawseq_seq_index_ids_path: Optional[str] = None,
+        rawseq_seq_db_fasta_path: Optional[str] = None,
+        rawseq_seq_db_fasta_index_db: Optional[str] = None,
+        rawseq_esm1b_model_name: str = "esm1b_t33_650M_UR50S",
+        rawseq_esm1b_repr_layer: int = 33,
+        rawseq_esm1b_max_len: int = 1022,
+        rawseq_esm1b_tuning_mode: str = "lora",
+        rawseq_esm1b_lora_rank: int = 8,
+        rawseq_esm1b_lora_alpha: float = 16.0,
+        rawseq_esm1b_lora_dropout: float = 0.0,
+        rawseq_esm1b_lora_target_modules: Sequence[str] = (
+            "self_attn.q_proj",
+            "self_attn.v_proj",
+            "self_attn.out_proj",
+            "fc1",
+            "fc2",
+        ),
+        rawseq_esm1b_train_layer_norm: bool = False,
+        rawseq_esm1b_backend: str = "fair_esm",
+        rawseq_esm1b_use_pretrained: bool = True,
+        rawseq_esm1b_compute_dtype: str = "bfloat16",
         openfold_checkpoint: Optional[str] = None,
         freeze_backbone: bool = True,
         train_openfold_all: bool = False,
@@ -59,30 +85,42 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         auto_disable_resolution_gated_losses: bool = True,
         resolution_gated_loss_warmup_steps: int = 128,
         low_prec: bool = False,
+        openfold_use_flash: bool = False,
         backbone_factory: Optional[Callable] = None,
         loss_factory: Optional[Callable] = None,
         seq_query_encoder_override: Optional[nn.Module] = None,
         struct_query_encoder_override: Optional[nn.Module] = None,
+        rawseq_seq_row_lookup_override: Optional[object] = None,
+        rawseq_seq_sequence_store_override: Optional[object] = None,
+        rawseq_seq_context_encoder_override: Optional[nn.Module] = None,
     ):
         super().__init__()
+        retrieval_pipeline = str(retrieval_pipeline).strip().lower()
         self.save_hyperparameters(
             ignore=[
                 "backbone_factory",
                 "loss_factory",
                 "seq_query_encoder_override",
                 "struct_query_encoder_override",
+                "rawseq_seq_row_lookup_override",
+                "rawseq_seq_sequence_store_override",
+                "rawseq_seq_context_encoder_override",
             ]
         )
 
-        if retrieval_pipeline not in {"legacy", "embed_project"}:
+        if retrieval_pipeline not in {"legacy", "embed_project", "rawseq_esm1b_ragstyle"}:
             raise ValueError(
                 f"Unsupported retrieval_pipeline={retrieval_pipeline!r}. "
-                "Expected one of {'legacy', 'embed_project'}."
+                "Expected one of {'legacy', 'embed_project', 'rawseq_esm1b_ragstyle'}."
             )
         if retrieval_ablation not in {"both", "seq_only", "struct_only"}:
             raise ValueError(
                 f"Unsupported retrieval_ablation={retrieval_ablation!r}. "
                 "Expected one of {'both', 'seq_only', 'struct_only'}."
+            )
+        if retrieval_pipeline == "rawseq_esm1b_ragstyle" and retrieval_ablation != "seq_only":
+            raise ValueError(
+                "retrieval_pipeline='rawseq_esm1b_ragstyle' currently requires retrieval_ablation='seq_only'."
             )
 
         self.lr = float(lr)
@@ -100,6 +138,19 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         self._nan_skip_total = 0
 
         self.config = model_config(config_preset, train=True, low_prec=low_prec)
+        if bool(openfold_use_flash):
+            if importlib.util.find_spec("flash_attn") is None:
+                raise ValueError(
+                    "model.use_flash=true requires `flash_attn` to be installed in the active environment."
+                )
+            self.config.globals.use_flash = True
+            # Keep mutually-exclusive attention flags in a valid state.
+            self.config.globals.use_lma = False
+            self.config.globals.use_deepspeed_evo_attention = False
+            logger.info(
+                "Enabled OpenFold FlashAttention where applicable "
+                "(globals.use_flash=True, use_lma=False, use_deepspeed_evo_attention=False)."
+            )
         # Retrieval training fixtures do not require templates.
         self.config.model.template.enabled = False
         self.config.data.common.use_templates = False
@@ -134,7 +185,7 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         else:
             query_pipeline = EmbedProjectQueryPipeline(
                 use_seq_encoder=seq_index_path is not None,
-                use_struct_encoder=struct_index_path is not None,
+                use_struct_encoder=(struct_index_path is not None and retrieval_pipeline != "rawseq_esm1b_ragstyle"),
                 retriever_esm2_model_name=retriever_esm2_model_name,
                 retriever_esm2_repr_layer=retriever_esm2_repr_layer,
                 retriever_esm2_max_len=retriever_esm2_max_len,
@@ -157,10 +208,61 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
             stages=retrieval_injection_stages,
         )
 
+        seq_row_lookup = None
+        seq_sequence_store = None
+        seq_context_encoder = None
+        if retrieval_pipeline == "rawseq_esm1b_ragstyle":
+            if seq_index_path is None:
+                raise ValueError(
+                    "rawseq_esm1b_ragstyle requires retrieval.sources.seq.index_path to be configured."
+                )
+            if rawseq_seq_row_lookup_override is not None:
+                seq_row_lookup = rawseq_seq_row_lookup_override
+            else:
+                if not rawseq_seq_index_ids_path:
+                    raise ValueError(
+                        "rawseq_esm1b_ragstyle requires rawseq_seq_index_ids_path "
+                        "(line-based row-aligned ids map for sequence index)."
+                    )
+                seq_row_lookup = RowIdLookup(rawseq_seq_index_ids_path)
+
+            if rawseq_seq_sequence_store_override is not None:
+                seq_sequence_store = rawseq_seq_sequence_store_override
+            else:
+                if not rawseq_seq_db_fasta_path or not rawseq_seq_db_fasta_index_db:
+                    raise ValueError(
+                        "rawseq_esm1b_ragstyle requires rawseq_seq_db_fasta_path and "
+                        "rawseq_seq_db_fasta_index_db."
+                    )
+                seq_sequence_store = FastaSequenceStore(
+                    fasta_path=rawseq_seq_db_fasta_path,
+                    index_db_path=rawseq_seq_db_fasta_index_db,
+                )
+
+            if rawseq_seq_context_encoder_override is not None:
+                seq_context_encoder = rawseq_seq_context_encoder_override
+            else:
+                seq_context_encoder = ESM1bContextEncoder(
+                    model_name=rawseq_esm1b_model_name,
+                    repr_layer=rawseq_esm1b_repr_layer,
+                    truncation_seq_length=rawseq_esm1b_max_len,
+                    tuning_mode=rawseq_esm1b_tuning_mode,
+                    lora_rank=rawseq_esm1b_lora_rank,
+                    lora_alpha=rawseq_esm1b_lora_alpha,
+                    lora_dropout=rawseq_esm1b_lora_dropout,
+                    lora_target_modules=rawseq_esm1b_lora_target_modules,
+                    train_layer_norm=rawseq_esm1b_train_layer_norm,
+                    backend=rawseq_esm1b_backend,
+                    esm_efficient_use_pretrained=rawseq_esm1b_use_pretrained,
+                    esm_efficient_compute_dtype=rawseq_esm1b_compute_dtype,
+                )
+
         seq_retriever = LazyFaissRetriever(seq_index_path, top_k=top_k, nprobe=nprobe) if seq_index_path else None
         struct_retriever = (
             LazyFaissRetriever(struct_index_path, top_k=top_k, nprobe=nprobe) if struct_index_path else None
         )
+        if retrieval_pipeline == "rawseq_esm1b_ragstyle":
+            struct_retriever = None
 
         seq_db_proj = nn.Linear(seq_index_dim, seq_embedding_dim)
         struct_db_proj = nn.Linear(struct_index_dim, seq_embedding_dim)
@@ -173,11 +275,34 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
             injection_plan=injection_plan,
             top_k=top_k,
             retrieval_ablation=retrieval_ablation,
+            retrieval_pipeline=retrieval_pipeline,
             seq_retriever=seq_retriever,
             struct_retriever=struct_retriever,
             seq_db_proj=seq_db_proj,
             struct_db_proj=struct_db_proj,
+            seq_row_lookup=seq_row_lookup,
+            seq_sequence_store=seq_sequence_store,
+            seq_context_encoder=seq_context_encoder,
         )
+
+        self._lora_trainable_params = 0.0
+        self._esm1b_trainable_params = 0.0
+        if retrieval_pipeline == "rawseq_esm1b_ragstyle":
+            ctx = self.controller.seq_context_encoder
+            if ctx is not None:
+                trainable = sum(p.numel() for p in ctx.parameters() if p.requires_grad)
+                lora_trainable = sum(
+                    p.numel()
+                    for name, p in ctx.named_parameters()
+                    if p.requires_grad and ("lora_A" in name or "lora_B" in name)
+                )
+                self._esm1b_trainable_params = float(trainable)
+                self._lora_trainable_params = float(lora_trainable)
+                logger.info(
+                    "rawseq_esm1b_ragstyle context encoder trainable params: total=%d lora=%d",
+                    int(trainable),
+                    int(lora_trainable),
+                )
 
         self.loss_fn = AlphaFoldLoss(self.config.loss) if loss_factory is None else loss_factory(self.config.loss)
         self._init_resolution_gated_tracking()
@@ -257,12 +382,34 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
         if self.freeze_backbone:
             if self.train_openfold_all:
                 self.openfold.train()
-                return
-            self.openfold.eval()
-            for module_name in self._openfold_trainable_modules:
-                module = getattr(self.openfold, module_name, None)
-                if module is not None:
-                    module.train()
+            else:
+                self.openfold.eval()
+                for module_name in self._openfold_trainable_modules:
+                    module = getattr(self.openfold, module_name, None)
+                    if module is not None:
+                        module.train()
+
+        if self.retrieval_pipeline == "rawseq_esm1b_ragstyle":
+            self.log(
+                "train/lora_trainable_params",
+                torch.tensor(float(self._lora_trainable_params), device=self.device),
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+            )
+            self.log(
+                "train/esm1b_trainable_params",
+                torch.tensor(float(self._esm1b_trainable_params), device=self.device),
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+            )
+
+    def teardown(self, stage: Optional[str] = None) -> None:
+        close_fn = getattr(self.controller, "close", None)
+        if callable(close_fn):
+            close_fn()
+        super().teardown(stage)
 
     def forward(self, batch: Dict[str, object]) -> Dict[str, torch.Tensor]:
         return self.controller(batch)
@@ -406,6 +553,30 @@ class RetrievalAugmentedLightningModule(pl.LightningModule):
             on_epoch=False,
             logger=True,
         )
+        if "retrieval_valid_hits" in outputs:
+            self.log(
+                "train/retrieval_valid_hits",
+                outputs["retrieval_valid_hits"].float().mean(),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
+        if "retrieval_context_tokens" in outputs:
+            self.log(
+                "train/context_tokens_used",
+                outputs["retrieval_context_tokens"].float().mean(),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
+        if "retrieval_skip_cross_applied" in outputs:
+            self.log(
+                "train/rag_skip_cross_applied",
+                outputs["retrieval_skip_cross_applied"].float().mean(),
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+            )
         self.log(
             "train/seq_retrieval_entropy",
             -(

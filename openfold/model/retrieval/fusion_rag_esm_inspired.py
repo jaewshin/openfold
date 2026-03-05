@@ -5,6 +5,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from .cross_attention import RetrievalCrossAttention
 from .interfaces import FusionStrategy
 from .registry import register_fusion
 
@@ -22,6 +23,8 @@ class RagEsmInspiredFusion(FusionStrategy):
         num_heads: int = 8,
         dropout: float = 0.0,
         mlp_hidden_mult: int = 2,
+        attention_backend: str = "auto",
+        flash_attn_compute_dtype: str = "bfloat16",
     ):
         super().__init__()
         if emb_dim % num_heads != 0:
@@ -30,11 +33,12 @@ class RagEsmInspiredFusion(FusionStrategy):
 
         self.pre_norm_q = nn.LayerNorm(emb_dim)
         self.pre_norm_kv = nn.LayerNorm(emb_dim)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=emb_dim,
+        self.cross_attn = RetrievalCrossAttention(
+            emb_dim=emb_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True,
+            attention_backend=attention_backend,
+            flash_attn_compute_dtype=flash_attn_compute_dtype,
         )
         self.context_proj = nn.Linear(emb_dim, emb_dim)
         self.mlp = nn.Sequential(
@@ -92,10 +96,14 @@ class RagEsmInspiredFusion(FusionStrategy):
         fused_context = torch.matmul(scores, pooled)  # [D]
 
         # Cross-attn: query tokens attend to flattened retrieved tokens.
-        q = self.pre_norm_q(query_tokens).unsqueeze(0)  # [1, Nq, D]
-        kv = self.pre_norm_kv(retrieved_tokens.reshape(-1, retrieved_tokens.shape[-1])).unsqueeze(0)
-        attn_out, _ = self.cross_attn(q, kv, kv, need_weights=False)
-        attn_out = attn_out.squeeze(0)
+        q = self.pre_norm_q(query_tokens)  # [Nq, D]
+        kv = self.pre_norm_kv(retrieved_tokens.reshape(-1, retrieved_tokens.shape[-1]))
+        flat_mask = retrieved_masks.reshape(-1).bool() if retrieved_masks is not None else None
+        attn_out = self.cross_attn(
+            query_tokens=q,
+            key_value_tokens=kv,
+            kv_valid_mask=flat_mask,
+        )
 
         context_bias = self.context_proj(fused_context).unsqueeze(0).expand_as(query_tokens)
         x = query_tokens + torch.sigmoid(self.cross_gate) * (attn_out + context_bias)

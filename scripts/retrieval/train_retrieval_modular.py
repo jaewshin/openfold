@@ -240,11 +240,19 @@ def _build_data_module(cfg: Dict, model_cfg: Dict, retrieval_cfg: Dict) -> "Retr
     from scripts.retrieval.retrieval_data import RetrievalDataModule, build_manifest, write_manifest_jsonl
 
     data_cfg = cfg.get("data", {})
+    retrieval_pipeline = str(retrieval_cfg.get("pipeline", "legacy")).strip().lower()
 
     packed_dataset_dir = data_cfg.get("packed_dataset_dir", None)
     dataset_dir = data_cfg.get("dataset_dir", None)
     manifest_path = data_cfg.get("manifest_path", None)
     write_manifest_to = data_cfg.get("write_manifest_to", None)
+
+    if retrieval_pipeline in {"embed_project", "rawseq_esm1b_ragstyle"} and packed_dataset_dir is not None:
+        raise ValueError(
+            f"retrieval.pipeline={retrieval_pipeline} requires `raw_sequence` metadata in each batch. "
+            "Packed retrieval shards currently store tensor features only. "
+            "Use data.dataset_dir or data.manifest_path."
+        )
 
     if dataset_dir and write_manifest_to:
         records = build_manifest(Path(dataset_dir), strict=True)
@@ -280,6 +288,13 @@ def _build_model(cfg: Dict) -> "RetrievalAugmentedLightningModule":
     optimizer_cfg = cfg.get("optimizer", {})
 
     embed_project_cfg = retrieval_cfg.get("embed_project", {})
+    rawseq_cfg = retrieval_cfg.get("rawseq_esm1b", {})
+    lora_targets = rawseq_cfg.get(
+        "lora_target_modules",
+        ["self_attn.q_proj", "self_attn.v_proj", "self_attn.out_proj", "fc1", "fc2"],
+    )
+    if isinstance(lora_targets, str):
+        lora_targets = [t.strip() for t in lora_targets.split(",") if t.strip()]
 
     return RetrievalAugmentedLightningModule(
         config_preset=str(model_cfg.get("config_preset", "seqemb_initial_training")),
@@ -302,6 +317,21 @@ def _build_model(cfg: Dict) -> "RetrievalAugmentedLightningModule":
         retriever_tmvec_checkpoint=embed_project_cfg.get("retriever_tmvec_checkpoint", None),
         retriever_tmvec_max_len=int(embed_project_cfg.get("retriever_tmvec_max_len", 1022)),
         retriever_normalize_queries=bool(embed_project_cfg.get("retriever_normalize_queries", True)),
+        rawseq_seq_index_ids_path=rawseq_cfg.get("seq_index_ids_path", None),
+        rawseq_seq_db_fasta_path=rawseq_cfg.get("seq_db_fasta_path", None),
+        rawseq_seq_db_fasta_index_db=rawseq_cfg.get("seq_db_fasta_index_db", None),
+        rawseq_esm1b_model_name=str(rawseq_cfg.get("esm1b_model_name", "esm1b_t33_650M_UR50S")),
+        rawseq_esm1b_repr_layer=int(rawseq_cfg.get("esm1b_repr_layer", 33)),
+        rawseq_esm1b_max_len=int(rawseq_cfg.get("esm1b_max_len", 1022)),
+        rawseq_esm1b_tuning_mode=str(rawseq_cfg.get("esm1b_tuning_mode", "lora")),
+        rawseq_esm1b_lora_rank=int(rawseq_cfg.get("lora_rank", 8)),
+        rawseq_esm1b_lora_alpha=float(rawseq_cfg.get("lora_alpha", 16.0)),
+        rawseq_esm1b_lora_dropout=float(rawseq_cfg.get("lora_dropout", 0.0)),
+        rawseq_esm1b_lora_target_modules=tuple(lora_targets),
+        rawseq_esm1b_train_layer_norm=bool(rawseq_cfg.get("train_layer_norm", False)),
+        rawseq_esm1b_backend=str(rawseq_cfg.get("backend", "fair_esm")),
+        rawseq_esm1b_use_pretrained=bool(rawseq_cfg.get("use_pretrained", True)),
+        rawseq_esm1b_compute_dtype=str(rawseq_cfg.get("compute_dtype", "bfloat16")),
         openfold_checkpoint=model_cfg.get("openfold_checkpoint", None),
         freeze_backbone=bool(model_cfg.get("freeze_backbone", True)),
         train_openfold_all=bool(model_cfg.get("train_openfold_all", False)),
@@ -311,6 +341,7 @@ def _build_model(cfg: Dict) -> "RetrievalAugmentedLightningModule":
         auto_disable_resolution_gated_losses=bool(model_cfg.get("auto_disable_resolution_gated_losses", True)),
         resolution_gated_loss_warmup_steps=int(model_cfg.get("resolution_gated_loss_warmup_steps", 128)),
         low_prec=bool(model_cfg.get("low_prec", False)),
+        openfold_use_flash=bool(model_cfg.get("use_flash", False)),
     )
 
 

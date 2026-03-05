@@ -1,9 +1,12 @@
 retrieval:
   fusion:
-    name: rag_esm_inspired
+    name: rag_esm_port
     params:
       num_heads: 8
       dropout: 0.0
       mlp_hidden_mult: 2
+      num_blocks: 4
+      layers_with_cross_attention: all
+      skip_cross_ratio: 0.1
       attention_backend: auto
       flash_attn_compute_dtype: bfloat16

@@ -1,0 +1,4 @@
+retrieval:
+  pipeline: rawseq_esm1b_ragstyle
+  ablation: seq_only
+

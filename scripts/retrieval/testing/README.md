@@ -145,10 +145,11 @@ python scripts/retrieval/testing/test_retrieval_modular_framework.py
 Validates:
 
 - fusion registry resolution and unknown-name errors
-- `simple_cross_attn` and `rag_esm_inspired` fusion shape/gradient behavior
+- `simple_cross_attn`, `rag_esm_inspired`, and `rag_esm_port` fusion shape/gradient behavior
 - multi-stage retrieval injection tensor wiring
 - source-mixing controller wiring and gradient flow
 - embed-project modular Lightning wiring with fake encoders/retrievers
+- rawseq-ESM1b ragstyle modular Lightning wiring with fake row lookup/sequence store/context encoder
 
 ## Suggested order
 

@@ -94,6 +94,44 @@ class FakeQueryEncoder(nn.Module):
         return self.proj(x)
 
 
+class FakeContextEncoder(nn.Module):
+    def __init__(self, emb_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(1, emb_dim)
+
+    def forward(self, sequences):
+        outs = []
+        for seq in sequences:
+            n = max(1, len(seq))
+            x = torch.ones(n, 1, device=self.proj.weight.device)
+            outs.append(self.proj(x))
+        return outs
+
+    def encode_with_ids(self, seq_pairs):
+        if not seq_pairs:
+            return {}
+        seqs = [seq for _, seq in seq_pairs]
+        embs = self.forward(seqs)
+        return {sid: emb for (sid, _), emb in zip(seq_pairs, embs)}
+
+
+class FakeRowLookup:
+    def get(self, row_idx: int):
+        return f"id_{int(row_idx)}"
+
+    def close(self):
+        return None
+
+
+class FakeSequenceStore:
+    def get(self, seq_id: str):
+        del seq_id
+        return "ACDEFGHIKLMN"
+
+    def close(self):
+        return None
+
+
 class TinyDataset(Dataset):
     def __init__(self, n_samples: int = 4, n_res: int = 6, emb_dim: int = 32, n_recycles: int = 2):
         self.items = []
@@ -144,6 +182,8 @@ def test_fusion_registry_and_unknown_name():
         raise AssertionError("simple_cross_attn missing from fusion registry")
     if "rag_esm_inspired" not in names:
         raise AssertionError("rag_esm_inspired missing from fusion registry")
+    if "rag_esm_port" not in names:
+        raise AssertionError("rag_esm_port missing from fusion registry")
 
     try:
         _ = build_fusion("does_not_exist", emb_dim=32)
@@ -159,8 +199,11 @@ def test_fusions_forward_and_gradients():
     scores = torch.softmax(torch.randn(3), dim=0)
     masks = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 0, 0, 0], [1, 1, 1, 1, 1]], dtype=torch.float32)
 
-    for name in ("simple_cross_attn", "rag_esm_inspired"):
-        fusion = build_fusion(name, emb_dim=32, num_heads=8, dropout=0.0)
+    for name in ("simple_cross_attn", "rag_esm_inspired", "rag_esm_port"):
+        kwargs = {"emb_dim": 32, "num_heads": 8, "dropout": 0.0}
+        if name == "rag_esm_port":
+            kwargs.update({"num_blocks": 2, "skip_cross_ratio": 0.0})
+        fusion = build_fusion(name, **kwargs)
         out = fusion(query, retrieved, scores, retrieved_masks=masks)
         if out.shape != query.shape:
             raise AssertionError(f"{name}: output shape mismatch")
@@ -172,6 +215,40 @@ def test_fusions_forward_and_gradients():
         has_grad = any((p.grad is not None and torch.isfinite(p.grad).all()) for p in fusion.parameters())
         if not has_grad:
             raise AssertionError(f"{name}: no finite gradients on parameters")
+
+
+def test_rag_fusions_support_attention_backend_override():
+    if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        print("[SKIP] sdpa attention backend override test: torch SDPA unavailable")
+        return
+
+    torch.manual_seed(0)
+    query = torch.randn(7, 32, requires_grad=True)
+    retrieved = torch.randn(3, 5, 32)
+    scores = torch.softmax(torch.randn(3), dim=0)
+    masks = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 0, 0, 0], [1, 1, 1, 1, 1]], dtype=torch.float32)
+
+    for name in ("rag_esm_inspired", "rag_esm_port"):
+        kwargs = {
+            "emb_dim": 32,
+            "num_heads": 8,
+            "dropout": 0.0,
+            "attention_backend": "sdpa",
+        }
+        if name == "rag_esm_port":
+            kwargs.update({"num_blocks": 2, "skip_cross_ratio": 0.0})
+        fusion = build_fusion(name, **kwargs)
+        out = fusion(query, retrieved, scores, retrieved_masks=masks)
+        if out.shape != query.shape:
+            raise AssertionError(f"{name}: output shape mismatch for sdpa backend")
+        if not torch.isfinite(out).all():
+            raise AssertionError(f"{name}: non-finite output for sdpa backend")
+
+        loss = out.pow(2).mean()
+        loss.backward(retain_graph=True)
+        has_grad = any((p.grad is not None and torch.isfinite(p.grad).all()) for p in fusion.parameters())
+        if not has_grad:
+            raise AssertionError(f"{name}: no finite gradients for sdpa backend")
 
 
 def test_multistage_injection_shapes_and_order():
@@ -306,6 +383,74 @@ def test_embed_project_pipeline_query_encoder_gradients_and_fit_smoke():
     trainer.fit(model, datamodule=dm)
 
 
+def test_rawseq_ragstyle_pipeline_context_encoder_gradients():
+    if not _HAS_LIGHTNING_MODEL_DEPS:
+        print("[SKIP] rawseq ragstyle smoke test: missing optional OpenFold training deps")
+        return
+
+    torch.manual_seed(0)
+    model = RetrievalAugmentedLightningModule(
+        config_preset="seqemb_initial_training",
+        seq_embedding_dim=32,
+        top_k=3,
+        lr=1e-2,
+        struct_index_path=None,
+        struct_index_dim=16,
+        seq_index_path="dummy.seq.index",
+        seq_index_dim=32,
+        retrieval_ablation="seq_only",
+        retrieval_pipeline="rawseq_esm1b_ragstyle",
+        fusion_name="rag_esm_port",
+        fusion_params={
+            "num_heads": 8,
+            "dropout": 0.0,
+            "mlp_hidden_mult": 2,
+            "num_blocks": 2,
+            "layers_with_cross_attention": "all",
+            "skip_cross_ratio": 0.0,
+        },
+        retrieval_injection_stages=("input",),
+        rawseq_seq_index_ids_path="unused_ids.txt",
+        rawseq_seq_db_fasta_path="unused.fasta",
+        rawseq_seq_db_fasta_index_db="unused.idx.sqlite",
+        backbone_factory=FakeBackbone,
+        loss_factory=FakeLoss,
+        freeze_backbone=False,
+        seq_query_encoder_override=FakeQueryEncoder(32),
+        rawseq_seq_row_lookup_override=FakeRowLookup(),
+        rawseq_seq_sequence_store_override=FakeSequenceStore(),
+        rawseq_seq_context_encoder_override=FakeContextEncoder(32),
+    )
+    model.controller.seq_retriever = FakeRetriever(dim=32)
+    model.log = lambda *args, **kwargs: None
+
+    batch = {
+        "seq_embedding": torch.randn(2, 6, 32, 2, requires_grad=True),
+        "seq_mask": torch.ones(2, 6, 2),
+        "raw_sequence": ["ACDEFGHIK", "LMNPQRSTV"],
+    }
+    optimizer = model.configure_optimizers()
+    optimizer.zero_grad(set_to_none=True)
+    loss = model.training_step(batch, 0)
+    loss.backward()
+
+    ctx = model.controller.seq_context_encoder
+    if not isinstance(ctx, FakeContextEncoder):
+        raise AssertionError("Expected fake context encoder override")
+    if ctx.proj.weight.grad is None:
+        raise AssertionError("rawseq ragstyle context encoder did not receive gradients")
+
+    outputs = model(batch)
+    if "retrieval_valid_hits" not in outputs:
+        raise AssertionError("Missing retrieval_valid_hits metric output")
+    if "retrieval_context_tokens" not in outputs:
+        raise AssertionError("Missing retrieval_context_tokens metric output")
+    if "retrieval_skip_cross_applied" not in outputs:
+        raise AssertionError("Missing retrieval_skip_cross_applied metric output")
+
+    optimizer.step()
+
+
 def test_invalid_frozen_backbone_config_rejected():
     cfg = {
         "model": {
@@ -376,6 +521,7 @@ def main():
     test_invalid_frozen_backbone_config_rejected()
     test_auto_checkpoint_resolution_and_optimizer_param_groups()
     test_embed_project_pipeline_query_encoder_gradients_and_fit_smoke()
+    test_rawseq_ragstyle_pipeline_context_encoder_gradients()
     print("[OK] modular retrieval framework tests passed")
 
 

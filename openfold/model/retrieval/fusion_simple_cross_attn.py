@@ -14,12 +14,21 @@ from .registry import register_fusion
 class SimpleCrossAttentionFusion(FusionStrategy):
     """Thin wrapper around existing cross-attention fusion baseline."""
 
-    def __init__(self, emb_dim: int = 1280, num_heads: int = 8, dropout: float = 0.0):
+    def __init__(
+        self,
+        emb_dim: int = 1280,
+        num_heads: int = 8,
+        dropout: float = 0.0,
+        attention_backend: str = "auto",
+        flash_attn_compute_dtype: str = "bfloat16",
+    ):
         super().__init__()
         self.inner = CrossAttentionFusion(
             emb_dim=emb_dim,
             num_heads=num_heads,
             dropout=dropout,
+            attention_backend=attention_backend,
+            flash_attn_compute_dtype=flash_attn_compute_dtype,
         )
 
     @property

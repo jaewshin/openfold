@@ -4,3 +4,5 @@ retrieval:
     params:
       num_heads: 8
       dropout: 0.0
+      attention_backend: auto
+      flash_attn_compute_dtype: bfloat16
