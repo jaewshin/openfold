@@ -17,6 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from openfold.model.retrieval.cross_attention import RetrievalCrossAttention
+
 
 class EmbeddingRetriever(nn.Module):
     """Differentiable retriever over a database of precomputed embeddings.
@@ -136,25 +138,25 @@ class CrossAttentionFusion(nn.Module):
         emb_dim: int = 1280,
         num_heads: int = 8,
         dropout: float = 0.0,
+        attention_backend: str = "auto",
+        flash_attn_compute_dtype: str = "bfloat16",
     ):
         super().__init__()
         self.emb_dim = emb_dim
         self.num_heads = num_heads
         assert emb_dim % num_heads == 0
 
-        self.head_dim = emb_dim // num_heads
-
-        # Query comes from the input embedding, K/V from retrieved
-        self.q_proj = nn.Linear(emb_dim, emb_dim)
-        self.k_proj = nn.Linear(emb_dim, emb_dim)
-        self.v_proj = nn.Linear(emb_dim, emb_dim)
-        self.out_proj = nn.Linear(emb_dim, emb_dim)
+        self.cross_attn = RetrievalCrossAttention(
+            emb_dim=emb_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            attention_backend=attention_backend,
+            flash_attn_compute_dtype=flash_attn_compute_dtype,
+        )
 
         self.layer_norm_q = nn.LayerNorm(emb_dim)
         self.layer_norm_kv = nn.LayerNorm(emb_dim)
         self.layer_norm_out = nn.LayerNorm(emb_dim)
-
-        self.dropout = nn.Dropout(dropout)
 
         # Gate so the module can learn to be a no-op initially
         self.gate = nn.Parameter(torch.zeros(1))
@@ -175,45 +177,14 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             [N_q, D] cross-attention output.
         """
-        N_q = query.shape[0]
-        N_kv = key_value.shape[0]
-        H = self.num_heads
-        d = self.head_dim
-
-        q = self.q_proj(self.layer_norm_q(query))         # [N_q, D]
-        k = self.k_proj(self.layer_norm_kv(key_value))    # [N_kv, D]
-        v = self.v_proj(self.layer_norm_kv(key_value))    # [N_kv, D]
-
-        # Reshape to multi-head: [H, N, d]
-        q = q.view(N_q, H, d).permute(1, 0, 2)           # [H, N_q, d]
-        k = k.view(N_kv, H, d).permute(1, 0, 2)          # [H, N_kv, d]
-        v = v.view(N_kv, H, d).permute(1, 0, 2)          # [H, N_kv, d]
-
-        # Scaled dot-product attention
-        attn = torch.matmul(q, k.transpose(-1, -2)) / (d ** 0.5)  # [H, N_q, N_kv]
-
-        if kv_mask is not None:
-            valid = kv_mask.bool()
-            if not valid.any():
-                # No valid KV tokens: return zero contribution for this retrieved item.
-                return torch.zeros_like(query)
-            attn = attn.masked_fill(
-                ~valid.unsqueeze(0).unsqueeze(1),  # [1, 1, N_kv]
-                -1e9,
-            )
-
-        attn = F.softmax(attn, dim=-1)
-        if kv_mask is not None:
-            # Keep masked positions at zero and renormalize valid positions.
-            valid = kv_mask.bool().unsqueeze(0).unsqueeze(1).to(attn.dtype)
-            attn = attn * valid
-            attn = attn / attn.sum(dim=-1, keepdim=True).clamp(min=1e-9)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)                       # [H, N_q, d]
-        out = out.permute(1, 0, 2).contiguous().view(N_q, -1)  # [N_q, D]
-        out = self.out_proj(out)
-        return out
+        q = self.layer_norm_q(query)
+        kv = self.layer_norm_kv(key_value)
+        valid_mask = kv_mask.bool() if kv_mask is not None else None
+        return self.cross_attn(
+            query_tokens=q,
+            key_value_tokens=kv,
+            kv_valid_mask=valid_mask,
+        )
 
     def forward(
         self,

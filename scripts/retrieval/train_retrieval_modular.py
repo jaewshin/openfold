@@ -48,28 +48,30 @@ def _load_config(path: Path, _visited: Optional[set] = None) -> Dict:
     if path in _visited:
         raise ValueError(f"Cyclic config defaults reference detected at: {path}")
     _visited.add(path)
+    try:
+        if not path.exists():
+            raise FileNotFoundError(f"Config not found: {path}")
 
-    if not path.exists():
-        raise FileNotFoundError(f"Config not found: {path}")
+        data = yaml.safe_load(path.read_text()) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Config root must be a mapping: {path}")
 
-    data = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Config root must be a mapping: {path}")
+        defaults = data.pop("defaults", [])
+        if defaults is None:
+            defaults = []
+        if not isinstance(defaults, list):
+            raise ValueError(f"'defaults' must be a list in config: {path}")
 
-    defaults = data.pop("defaults", [])
-    if defaults is None:
-        defaults = []
-    if not isinstance(defaults, list):
-        raise ValueError(f"'defaults' must be a list in config: {path}")
+        merged: Dict = {}
+        for rel in defaults:
+            child_path = (path.parent / str(rel)).resolve()
+            child_cfg = _load_config(child_path, _visited=_visited)
+            merged = _deep_merge(merged, child_cfg)
 
-    merged: Dict = {}
-    for rel in defaults:
-        child_path = (path.parent / str(rel)).resolve()
-        child_cfg = _load_config(child_path, _visited=_visited)
-        merged = _deep_merge(merged, child_cfg)
-
-    merged = _deep_merge(merged, data)
-    return merged
+        merged = _deep_merge(merged, data)
+        return merged
+    finally:
+        _visited.remove(path)
 
 
 def _set_nested(cfg: Dict, dotted_key: str, value):

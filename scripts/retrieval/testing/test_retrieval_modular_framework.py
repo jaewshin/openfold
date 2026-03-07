@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytorch_lightning as pl
@@ -26,7 +27,14 @@ from openfold.model.retrieval import (
 )
 from openfold.model.retrieval.interfaces import FusionStrategy
 from openfold.model.retrieval.pipeline_legacy import LegacyQueryPipeline
-from scripts.retrieval.train_retrieval_modular import _validate_model_cfg
+from scripts.retrieval import train_retrieval_modular as train_mod
+from scripts.retrieval.train_retrieval_modular import (
+    _build_checkpoint_callbacks,
+    _build_trainer_kwargs,
+    _load_config,
+    _resolve_trainer_resume_ckpt_path,
+    _validate_model_cfg,
+)
 
 try:
     from openfold.model.retrieval.lightning_module import RetrievalAugmentedLightningModule
@@ -699,6 +707,188 @@ def test_auto_checkpoint_resolution_and_optimizer_param_groups():
         raise AssertionError(f"Unexpected optimizer group learning rates: {lrs}")
 
 
+def test_trainer_kwargs_and_checkpoint_callback_config():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        output_dir = base / "run"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        trainer_cfg = {
+            "accelerator": "gpu",
+            "devices": 4,
+            "num_nodes": 1,
+            "strategy": "ddp",
+            "precision": "32",
+            "max_epochs": 1,
+            "max_steps": 44069,
+            "max_time": "23:45:00",
+            "val_check_interval": 5000,
+            "accumulate_grad_batches": 16,
+            "num_sanity_val_steps": 0,
+            "log_every_n_steps": 25,
+            "enable_checkpointing": True,
+            "checkpoint": {
+                "every_n_train_steps": 500,
+                "save_last": True,
+                "save_top_k": -1,
+                "filename": "step={step}",
+                "save_on_train_epoch_end": False,
+            },
+        }
+
+        callbacks = _build_checkpoint_callbacks(trainer_cfg, output_dir=output_dir, base_dir=base)
+        if len(callbacks) != 1:
+            raise AssertionError("Expected a single checkpoint callback")
+
+        checkpoint_cb = callbacks[0]
+        expected_dir = (output_dir / "checkpoints").resolve()
+        actual_dir = Path(checkpoint_cb.dirpath).resolve()
+        if actual_dir != expected_dir:
+            raise AssertionError(f"Unexpected checkpoint dirpath: {actual_dir} != {expected_dir}")
+        if checkpoint_cb.every_n_train_steps != 500:
+            raise AssertionError("Checkpoint interval did not come from config")
+        if checkpoint_cb.save_last is not True:
+            raise AssertionError("Checkpoint save_last should be true")
+        if checkpoint_cb.save_top_k != -1:
+            raise AssertionError("Checkpoint save_top_k should be -1")
+        if checkpoint_cb.filename != "step={step}":
+            raise AssertionError("Checkpoint filename pattern mismatch")
+
+        trainer_kwargs = _build_trainer_kwargs(
+            trainer_cfg,
+            output_dir=output_dir,
+            base_dir=base,
+            trainer_logger=False,
+            callbacks=callbacks,
+        )
+        if trainer_kwargs["max_steps"] != 44069:
+            raise AssertionError("trainer.max_steps not forwarded")
+        if trainer_kwargs["max_time"] != "23:45:00":
+            raise AssertionError("trainer.max_time not forwarded")
+        if trainer_kwargs["num_nodes"] != 1:
+            raise AssertionError("trainer.num_nodes not forwarded")
+        if trainer_kwargs["strategy"] != "ddp":
+            raise AssertionError("trainer.strategy not forwarded")
+        if len(trainer_kwargs["callbacks"]) != 1:
+            raise AssertionError("Expected checkpoint callback in trainer kwargs")
+
+
+def test_resume_ckpt_path_resolution_prefers_output_dir():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        output_dir = base / "run"
+        ckpt_dir = output_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / "last.ckpt"
+        ckpt_path.write_bytes(b"fake")
+
+        resolved = _resolve_trainer_resume_ckpt_path(
+            {"resume_ckpt_path": "checkpoints/last.ckpt"},
+            output_dir=output_dir,
+            base_dir=base,
+        )
+        if resolved != str(ckpt_path.resolve()):
+            raise AssertionError("Resume checkpoint path was not resolved relative to output_dir")
+
+        try:
+            _resolve_trainer_resume_ckpt_path(
+                {"resume_ckpt_path": "checkpoints/missing.ckpt"},
+                output_dir=output_dir,
+                base_dir=base,
+            )
+            raise AssertionError("Missing trainer.resume_ckpt_path should raise FileNotFoundError")
+        except FileNotFoundError:
+            pass
+
+
+def test_main_forwards_resume_ckpt_and_trainer_limits():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        output_dir = base / "run"
+        ckpt_dir = output_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        openfold_ckpt = base / "seq_model_esm1b_ptm.pt"
+        openfold_ckpt.write_bytes(b"fake-openfold")
+        resume_ckpt = ckpt_dir / "last.ckpt"
+        resume_ckpt.write_bytes(b"fake-resume")
+
+        config_path = base / "config.yaml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "model:",
+                    f"  openfold_checkpoint: {openfold_ckpt}",
+                    "  freeze_backbone: true",
+                    "  train_openfold_all: false",
+                    "  trainable_backbone_modules: []",
+                    "trainer:",
+                    f"  output_dir: {output_dir}",
+                    "  accelerator: gpu",
+                    "  devices: 4",
+                    "  num_nodes: 1",
+                    "  strategy: ddp",
+                    "  max_epochs: 1",
+                    "  max_steps: 44069",
+                    "  max_time: '23:45:00'",
+                    "  val_check_interval: 5000",
+                    "  accumulate_grad_batches: 16",
+                    "  num_sanity_val_steps: 0",
+                    "  log_every_n_steps: 25",
+                    "  enable_checkpointing: true",
+                    "  resume_ckpt_path: checkpoints/last.ckpt",
+                    "  checkpoint:",
+                    "    every_n_train_steps: 500",
+                    "    save_last: true",
+                    "    save_top_k: -1",
+                    "    filename: step={step}",
+                    "    save_on_train_epoch_end: false",
+                ]
+            )
+        )
+
+        trainer_instance = mock.Mock()
+        with mock.patch.object(train_mod, "_build_model", return_value=object()), \
+            mock.patch.object(train_mod, "_build_data_module", return_value=object()), \
+            mock.patch.object(train_mod, "_build_trainer_logger", return_value=False), \
+            mock.patch.object(train_mod.pl, "Trainer", return_value=trainer_instance) as trainer_cls, \
+            mock.patch.object(sys, "argv", ["train_retrieval_modular.py", "--config", str(config_path)]):
+            train_mod.main()
+
+        trainer_kwargs = trainer_cls.call_args.kwargs
+        if trainer_kwargs.get("max_steps") != 44069:
+            raise AssertionError("main() did not forward trainer.max_steps")
+        if trainer_kwargs.get("max_time") != "23:45:00":
+            raise AssertionError("main() did not forward trainer.max_time")
+        if trainer_kwargs.get("num_nodes") != 1:
+            raise AssertionError("main() did not forward trainer.num_nodes")
+        if trainer_kwargs.get("strategy") != "ddp":
+            raise AssertionError("main() did not forward trainer.strategy")
+
+        fit_kwargs = trainer_instance.fit.call_args.kwargs
+        if fit_kwargs.get("ckpt_path") != str(resume_ckpt.resolve()):
+            raise AssertionError("main() did not pass trainer.resume_ckpt_path into trainer.fit")
+
+
+def test_config_loader_allows_shared_defaults_without_false_cycle():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir)
+        shared = base / "shared.yaml"
+        parent = base / "parent.yaml"
+        root = base / "root.yaml"
+
+        shared.write_text("trainer:\n  devices: 4\n")
+        parent.write_text("defaults:\n  - shared.yaml\ntrainer:\n  strategy: ddp\n")
+        root.write_text("defaults:\n  - parent.yaml\n  - shared.yaml\ntrainer:\n  max_steps: 10\n")
+
+        merged = _load_config(root)
+        if merged["trainer"]["devices"] != 4:
+            raise AssertionError("Shared default did not merge correctly")
+        if merged["trainer"]["strategy"] != "ddp":
+            raise AssertionError("Parent default did not merge correctly")
+        if merged["trainer"]["max_steps"] != 10:
+            raise AssertionError("Root config did not merge correctly")
+
+
 def main():
     test_fusion_registry_and_unknown_name()
     test_fusions_forward_and_gradients()
@@ -706,6 +896,10 @@ def main():
     test_controller_outputs_and_source_mixing_gradients()
     test_invalid_frozen_backbone_config_rejected()
     test_auto_checkpoint_resolution_and_optimizer_param_groups()
+    test_trainer_kwargs_and_checkpoint_callback_config()
+    test_resume_ckpt_path_resolution_prefers_output_dir()
+    test_main_forwards_resume_ckpt_and_trainer_limits()
+    test_config_loader_allows_shared_defaults_without_false_cycle()
     test_embed_project_pipeline_query_encoder_gradients_and_fit_smoke()
     test_rawseq_ragstyle_pipeline_context_encoder_gradients()
     test_rawseq_ragstyle_uses_esm1b_query_tokens_for_fusion()

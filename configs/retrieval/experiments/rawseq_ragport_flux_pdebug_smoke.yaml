@@ -1,0 +1,17 @@
+defaults:
+  - rawseq_ragport_flux.yaml
+
+data:
+  num_workers: 0
+
+trainer:
+  num_nodes: 1
+  val_check_interval: 10
+  max_steps: 10
+  log_every_n_steps: 1
+  checkpoint:
+    every_n_train_steps: 1
+    save_last: true
+    save_top_k: -1
+    filename: "step={step}"
+    save_on_train_epoch_end: false

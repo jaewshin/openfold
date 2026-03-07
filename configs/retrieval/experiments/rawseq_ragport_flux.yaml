@@ -1,0 +1,72 @@
+defaults:
+  - ../base.yaml
+  - ../fusion/rag_esm_port.yaml
+  - ../injection/input_only.yaml
+  - ../pipeline/rawseq_esm1b_ragstyle.yaml
+  - ../train/frozen_backbone.yaml
+
+model:
+  use_flash: true
+
+retrieval:
+  top_k: 8
+  nprobe: 64
+  sources:
+    seq:
+      index_dim: 480
+    struct:
+      index_path: null
+      index_dim: 512
+  embed_project:
+    retriever_esm2_model_name: esm2_t12_35M_UR50D
+    retriever_esm2_repr_layer: 12
+    retriever_esm2_max_len: 1022
+    retriever_normalize_queries: true
+  rawseq_esm1b:
+    esm1b_model_name: esm1b_t33_650M_UR50S
+    esm1b_repr_layer: 33
+    esm1b_max_len: 1022
+    backend: esm_efficient
+    fallback_backend: null
+    allow_download: false
+    use_pretrained: true
+    compute_dtype: bfloat16
+    esm1b_tuning_mode: lora
+    lora_rank: 8
+    lora_alpha: 16.0
+    lora_dropout: 0.0
+    lora_target_modules: [self_attn.q_proj, self_attn.v_proj, self_attn.out_proj, fc1, fc2]
+    train_layer_norm: false
+  fusion:
+    params:
+      attention_backend: flash_attn
+      flash_attn_compute_dtype: bfloat16
+
+data:
+  batch_size: 1
+  num_workers: 4
+  max_recycling_iters: 0
+
+trainer:
+  accelerator: gpu
+  devices: 4
+  num_nodes: 1
+  strategy: ddp
+  precision: "32"
+  accumulate_grad_batches: 16
+  val_check_interval: 5000
+  max_steps: 44069
+  log_every_n_steps: 25
+  enable_checkpointing: true
+  checkpoint:
+    every_n_train_steps: 500
+    save_last: true
+    save_top_k: -1
+    filename: "step={step}"
+    save_on_train_epoch_end: false
+
+wandb:
+  enabled: true
+  project: openfold-retrieval
+  entity: jshin
+  resume: allow
