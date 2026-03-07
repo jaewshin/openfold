@@ -4,6 +4,11 @@ from lightning.fabric.plugins.environments.cluster_environment import ClusterEnv
 
 
 class FLUXEnvironment(ClusterEnvironment):
+    @staticmethod
+    def detect() -> bool:
+        required = ("FLUX_JOB_SIZE", "FLUX_JOB_NNODES", "FLUX_TASK_RANK", "FLUX_TASK_LOCAL_ID")
+        return all(key in os.environ for key in required)
+
     @property
     def creates_processes_externally(self) -> bool:
         return True
