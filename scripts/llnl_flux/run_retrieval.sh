@@ -39,6 +39,7 @@ source ~/.bashrc
 eval "$(mamba shell hook --shell bash)"
 # mamba_env=/p/vast1/OpenFoldCollab/genome_lm/envs/glm_rocm7_2_0
 mamba_env="/usr/WS2/shin9/miniforge3/envs/openfold_dev" # use custom env for openfold_dev
+
 mamba activate $mamba_env
 
 #export PYTHONPATH=$PYTHONPATH:/p/vast1/OpenFoldCollab/genome_lm/envs/glm_rocm7_1_0_repos/hydra
