@@ -43,6 +43,10 @@ retrieval:
     esm1b_repr_layer: 33
     esm1b_max_len: 1022
     backend: fair_esm
+    fallback_backend: null
+    allow_download: true
+    hf_cache_dir: null
+    torch_hub_dir: null
     use_pretrained: true
     compute_dtype: bfloat16
     esm1b_tuning_mode: lora
@@ -77,13 +81,25 @@ trainer:
   output_dir: ./outputs/retrieval_modular
   accelerator: auto
   devices: 1
+  num_nodes: 1
+  strategy: auto
   precision: "32"
   max_epochs: 1
+  max_steps: null
+  max_time: null
   val_check_interval: 1000
   accumulate_grad_batches: 1
   num_sanity_val_steps: 0
   log_every_n_steps: 25
   enable_checkpointing: true
+  resume_ckpt_path: null
+  checkpoint:
+    dirpath: null
+    every_n_train_steps: 500
+    save_last: true
+    save_top_k: -1
+    filename: "step={step}"
+    save_on_train_epoch_end: false
 
 wandb:
   enabled: false

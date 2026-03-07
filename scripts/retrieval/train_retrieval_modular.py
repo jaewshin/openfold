@@ -9,10 +9,11 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
 import pytorch_lightning as pl
 import torch
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 # Allow running directly from any working directory.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -157,6 +158,42 @@ def _resolve_openfold_checkpoint(model_cfg: Dict, base_dir: Path) -> Optional[st
     return str(best)
 
 
+def _resolve_optional_path(
+    path_like,
+    *,
+    base_dir: Path,
+    default_dir: Optional[Path] = None,
+    must_exist: bool = False,
+    description: str = "path",
+) -> Optional[Path]:
+    if path_like is None:
+        return None
+
+    raw = str(path_like).strip()
+    if raw == "" or raw.lower() == "null":
+        return None
+
+    path = Path(raw).expanduser()
+    candidates = [path]
+    if not path.is_absolute():
+        if default_dir is not None:
+            candidates.append(default_dir / path)
+        candidates.append(base_dir / path)
+
+    resolved = None
+    for candidate in candidates:
+        candidate_resolved = candidate.resolve()
+        if not must_exist or candidate_resolved.exists():
+            resolved = candidate_resolved
+            break
+
+    if resolved is None:
+        tried = ", ".join(str(candidate.resolve()) for candidate in candidates)
+        raise FileNotFoundError(f"Configured {description} does not exist; tried: {tried}")
+
+    return resolved
+
+
 def _validate_model_cfg(cfg: Dict, base_dir: Path) -> Dict:
     out = dict(cfg)
     model_cfg = dict(out.get("model", {}))
@@ -177,6 +214,89 @@ def _validate_model_cfg(cfg: Dict, base_dir: Path) -> Dict:
 
     out["model"] = model_cfg
     return out
+
+
+def _build_checkpoint_callbacks(trainer_cfg: Dict, *, output_dir: Path, base_dir: Path) -> List[ModelCheckpoint]:
+    if not bool(trainer_cfg.get("enable_checkpointing", True)):
+        return []
+
+    checkpoint_cfg = dict(trainer_cfg.get("checkpoint", {}) or {})
+    dirpath = _resolve_optional_path(
+        checkpoint_cfg.get("dirpath", None),
+        base_dir=base_dir,
+        default_dir=output_dir,
+        must_exist=False,
+        description="trainer.checkpoint.dirpath",
+    )
+    if dirpath is None:
+        dirpath = output_dir / "checkpoints"
+    dirpath.mkdir(parents=True, exist_ok=True)
+
+    callback = ModelCheckpoint(
+        dirpath=str(dirpath),
+        filename=str(checkpoint_cfg.get("filename", "step={step}")),
+        every_n_train_steps=int(checkpoint_cfg.get("every_n_train_steps", 500)),
+        save_last=bool(checkpoint_cfg.get("save_last", True)),
+        save_top_k=int(checkpoint_cfg.get("save_top_k", -1)),
+        save_on_train_epoch_end=bool(checkpoint_cfg.get("save_on_train_epoch_end", False)),
+    )
+    return [callback]
+
+
+def _build_trainer_kwargs(
+    trainer_cfg: Dict,
+    *,
+    output_dir: Path,
+    base_dir: Path,
+    trainer_logger,
+    callbacks: Sequence[Any],
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "default_root_dir": str(output_dir),
+        "logger": trainer_logger,
+        "accelerator": str(trainer_cfg.get("accelerator", _auto_accelerator())),
+        "devices": int(trainer_cfg.get("devices", 1)),
+        "precision": str(trainer_cfg.get("precision", "32")),
+        "max_epochs": int(trainer_cfg.get("max_epochs", 1)),
+        "val_check_interval": int(trainer_cfg.get("val_check_interval", 1000)),
+        "accumulate_grad_batches": int(trainer_cfg.get("accumulate_grad_batches", 1)),
+        "num_sanity_val_steps": int(trainer_cfg.get("num_sanity_val_steps", 0)),
+        "log_every_n_steps": int(trainer_cfg.get("log_every_n_steps", 25)),
+        "enable_checkpointing": bool(trainer_cfg.get("enable_checkpointing", True)),
+        "num_nodes": int(trainer_cfg.get("num_nodes", 1)),
+        "strategy": str(trainer_cfg.get("strategy", "auto")),
+        "callbacks": list(callbacks),
+    }
+
+    max_steps = trainer_cfg.get("max_steps", None)
+    if max_steps is not None:
+        kwargs["max_steps"] = int(max_steps)
+
+    max_time = trainer_cfg.get("max_time", None)
+    if max_time is not None:
+        max_time_str = str(max_time).strip()
+        if max_time_str and max_time_str.lower() != "null":
+            kwargs["max_time"] = max_time_str
+
+    return kwargs
+
+
+def _resolve_trainer_resume_ckpt_path(
+    trainer_cfg: Dict,
+    *,
+    output_dir: Path,
+    base_dir: Path,
+) -> Optional[str]:
+    path = _resolve_optional_path(
+        trainer_cfg.get("resume_ckpt_path", None),
+        base_dir=base_dir,
+        default_dir=output_dir,
+        must_exist=True,
+        description="trainer.resume_ckpt_path",
+    )
+    if path is None:
+        return None
+    return str(path)
 
 
 def _build_trainer_logger(cfg: Dict, output_dir: Path):
@@ -330,6 +450,10 @@ def _build_model(cfg: Dict) -> "RetrievalAugmentedLightningModule":
         rawseq_esm1b_lora_target_modules=tuple(lora_targets),
         rawseq_esm1b_train_layer_norm=bool(rawseq_cfg.get("train_layer_norm", False)),
         rawseq_esm1b_backend=str(rawseq_cfg.get("backend", "fair_esm")),
+        rawseq_esm1b_fallback_backend=rawseq_cfg.get("fallback_backend", None),
+        rawseq_esm1b_allow_download=bool(rawseq_cfg.get("allow_download", True)),
+        rawseq_esm1b_hf_cache_dir=rawseq_cfg.get("hf_cache_dir", None),
+        rawseq_esm1b_torch_hub_dir=rawseq_cfg.get("torch_hub_dir", None),
         rawseq_esm1b_use_pretrained=bool(rawseq_cfg.get("use_pretrained", True)),
         rawseq_esm1b_compute_dtype=str(rawseq_cfg.get("compute_dtype", "bfloat16")),
         openfold_checkpoint=model_cfg.get("openfold_checkpoint", None),
@@ -379,21 +503,22 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     trainer_logger = _build_trainer_logger(cfg, output_dir=output_dir)
-    trainer = pl.Trainer(
-        default_root_dir=str(output_dir),
-        logger=trainer_logger,
-        accelerator=str(trainer_cfg.get("accelerator", _auto_accelerator())),
-        devices=int(trainer_cfg.get("devices", 1)),
-        precision=str(trainer_cfg.get("precision", "32")),
-        max_epochs=int(trainer_cfg.get("max_epochs", 1)),
-        val_check_interval=int(trainer_cfg.get("val_check_interval", 1000)),
-        accumulate_grad_batches=int(trainer_cfg.get("accumulate_grad_batches", 1)),
-        num_sanity_val_steps=int(trainer_cfg.get("num_sanity_val_steps", 0)),
-        log_every_n_steps=int(trainer_cfg.get("log_every_n_steps", 25)),
-        enable_checkpointing=bool(trainer_cfg.get("enable_checkpointing", True)),
+    callbacks = _build_checkpoint_callbacks(trainer_cfg, output_dir=output_dir, base_dir=REPO_ROOT)
+    trainer_kwargs = _build_trainer_kwargs(
+        trainer_cfg,
+        output_dir=output_dir,
+        base_dir=REPO_ROOT,
+        trainer_logger=trainer_logger,
+        callbacks=callbacks,
+    )
+    resume_ckpt_path = _resolve_trainer_resume_ckpt_path(
+        trainer_cfg,
+        output_dir=output_dir,
+        base_dir=REPO_ROOT,
     )
 
-    trainer.fit(model, datamodule=data_module)
+    trainer = pl.Trainer(**trainer_kwargs)
+    trainer.fit(model, datamodule=data_module, ckpt_path=resume_ckpt_path)
 
 
 if __name__ == "__main__":

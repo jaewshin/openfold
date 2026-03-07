@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -81,6 +81,65 @@ class RetrievalController(nn.Module):
         if self.seq_context_encoder is None:
             raise RuntimeError("rawseq_esm1b_ragstyle requires configured seq_context_encoder.")
         return self.seq_row_lookup, self.seq_sequence_store, self.seq_context_encoder
+
+    @staticmethod
+    def _resize_tokens_to_length(
+        tokens: Optional[torch.Tensor],
+        target_len: int,
+        emb_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        out = torch.zeros(target_len, emb_dim, device=device, dtype=torch.float32)
+        if tokens is None:
+            return out.to(dtype=dtype)
+
+        t = tokens.to(device=device, dtype=torch.float32)
+        if t.ndim != 2:
+            raise ValueError(f"Expected token tensor rank-2 [N, D], got shape={tuple(t.shape)}")
+        if int(t.shape[-1]) != int(emb_dim):
+            raise ValueError(
+                f"Token embedding dim mismatch: got {int(t.shape[-1])}, expected {int(emb_dim)}."
+            )
+
+        n = min(int(t.shape[0]), int(target_len))
+        if n > 0:
+            out[:n] = t[:n]
+        return out.to(dtype=dtype)
+
+    def _prepare_rawseq_query_tokens_batch(
+        self,
+        raw_sequences: Sequence[object],
+        query_tokens: torch.Tensor,
+    ) -> List[torch.Tensor]:
+        """Encode query raw sequences with ESM1b for fusion-time query tokens."""
+        _, _, context_encoder = self._lookup_seq_raw_components()
+
+        pairs: List[Tuple[str, str]] = []
+        for i, seq in enumerate(raw_sequences):
+            seq_s = "" if seq is None else str(seq)
+            if not seq_s:
+                continue
+            pairs.append((f"__query__{i}", seq_s))
+
+        emb_map = context_encoder.encode_with_ids(pairs) if pairs else {}
+
+        out: List[torch.Tensor] = []
+        batch_size = int(query_tokens.shape[0])
+        emb_dim = int(query_tokens.shape[-1])
+        for i in range(batch_size):
+            key = f"__query__{i}"
+            target_len = int(query_tokens[i].shape[0])
+            out.append(
+                self._resize_tokens_to_length(
+                    tokens=emb_map.get(key),
+                    target_len=target_len,
+                    emb_dim=emb_dim,
+                    device=query_tokens.device,
+                    dtype=query_tokens.dtype,
+                )
+            )
+        return out
 
     def _prepare_rawseq_seq_context(
         self,
@@ -270,6 +329,21 @@ class RetrievalController(nn.Module):
             use_seq=use_seq,
             use_struct=use_struct,
         )
+        rawseq_query_tokens_batch: Optional[List[torch.Tensor]] = None
+        if self.retrieval_pipeline == "rawseq_esm1b_ragstyle" and use_seq:
+            if raw_sequences is None:
+                raise ValueError("rawseq_esm1b_ragstyle requires `raw_sequence` metadata in each batch.")
+            if not isinstance(raw_sequences, (list, tuple)):
+                raise ValueError("Expected `raw_sequence` metadata to be a list/tuple.")
+            if len(raw_sequences) != int(query_tokens.shape[0]):
+                raise ValueError(
+                    "raw_sequence batch size mismatch: "
+                    f"got {len(raw_sequences)} sequences, expected {int(query_tokens.shape[0])}."
+                )
+            rawseq_query_tokens_batch = self._prepare_rawseq_query_tokens_batch(
+                raw_sequences=raw_sequences,
+                query_tokens=query_tokens,
+            )
 
         fused_list = []
         seq_scores_list = []
@@ -300,9 +374,10 @@ class RetrievalController(nn.Module):
                     raise RuntimeError("Sequence source enabled but query pipeline did not return seq vectors")
                 if self.seq_retriever is None:
                     raise RuntimeError("Sequence source enabled but seq retriever not configured")
+                q_tok_seq = rawseq_query_tokens_batch[b] if rawseq_query_tokens_batch is not None else q_tok
                 seq_fused, seq_scores, seq_indices, seq_stats = self._run_source(
                     source="seq",
-                    query_tokens=q_tok,
+                    query_tokens=q_tok_seq,
                     query_vec=vectors.seq[b],
                     retriever=self.seq_retriever,
                     db_proj=self.seq_db_proj,

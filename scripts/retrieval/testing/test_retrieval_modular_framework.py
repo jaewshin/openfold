@@ -24,6 +24,7 @@ from openfold.model.retrieval import (
     available_fusions,
     build_fusion,
 )
+from openfold.model.retrieval.interfaces import FusionStrategy
 from openfold.model.retrieval.pipeline_legacy import LegacyQueryPipeline
 from scripts.retrieval.train_retrieval_modular import _validate_model_cfg
 
@@ -130,6 +131,58 @@ class FakeSequenceStore:
 
     def close(self):
         return None
+
+
+class RecordingFusion(FusionStrategy):
+    def __init__(self):
+        super().__init__()
+        self.last_query_tokens = None
+        self.last_retrieved_tokens = None
+        self.last_retrieved_masks = None
+
+    @property
+    def name(self) -> str:
+        return "recording"
+
+    def forward(
+        self,
+        query_tokens: torch.Tensor,
+        retrieved_tokens: torch.Tensor,
+        retrieved_scores: torch.Tensor,
+        retrieved_masks: torch.Tensor | None = None,
+        context: dict | None = None,
+    ) -> torch.Tensor:
+        del retrieved_scores, context
+        self.last_query_tokens = query_tokens.detach().clone()
+        self.last_retrieved_tokens = retrieved_tokens.detach().clone()
+        self.last_retrieved_masks = None if retrieved_masks is None else retrieved_masks.detach().clone()
+        return query_tokens
+
+
+class ScoreDependentFusion(FusionStrategy):
+    @property
+    def name(self) -> str:
+        return "score_dependent"
+
+    def forward(
+        self,
+        query_tokens: torch.Tensor,
+        retrieved_tokens: torch.Tensor,
+        retrieved_scores: torch.Tensor,
+        retrieved_masks: torch.Tensor | None = None,
+        context: dict | None = None,
+    ) -> torch.Tensor:
+        del retrieved_tokens, retrieved_masks, context
+        if retrieved_scores.numel() == 0:
+            return query_tokens
+        weights = torch.arange(
+            1,
+            int(retrieved_scores.shape[0]) + 1,
+            device=query_tokens.device,
+            dtype=query_tokens.dtype,
+        )
+        bias = (retrieved_scores.to(dtype=query_tokens.dtype) * weights).sum()
+        return query_tokens + bias * torch.ones_like(query_tokens)
 
 
 class TinyDataset(Dataset):
@@ -451,6 +504,139 @@ def test_rawseq_ragstyle_pipeline_context_encoder_gradients():
     optimizer.step()
 
 
+def test_rawseq_ragstyle_uses_esm1b_query_tokens_for_fusion():
+    if not _HAS_LIGHTNING_MODEL_DEPS:
+        print("[SKIP] rawseq query-token fusion test: missing optional OpenFold training deps")
+        return
+
+    torch.manual_seed(0)
+    model = RetrievalAugmentedLightningModule(
+        config_preset="seqemb_initial_training",
+        seq_embedding_dim=32,
+        top_k=3,
+        lr=1e-2,
+        struct_index_path=None,
+        struct_index_dim=16,
+        seq_index_path="dummy.seq.index",
+        seq_index_dim=32,
+        retrieval_ablation="seq_only",
+        retrieval_pipeline="rawseq_esm1b_ragstyle",
+        fusion_name="rag_esm_port",
+        fusion_params={
+            "num_heads": 8,
+            "dropout": 0.0,
+            "mlp_hidden_mult": 2,
+            "num_blocks": 2,
+            "layers_with_cross_attention": "all",
+            "skip_cross_ratio": 0.0,
+        },
+        retrieval_injection_stages=("input",),
+        rawseq_seq_index_ids_path="unused_ids.txt",
+        rawseq_seq_db_fasta_path="unused.fasta",
+        rawseq_seq_db_fasta_index_db="unused.idx.sqlite",
+        backbone_factory=FakeBackbone,
+        loss_factory=FakeLoss,
+        freeze_backbone=False,
+        seq_query_encoder_override=FakeQueryEncoder(32),
+        rawseq_seq_row_lookup_override=FakeRowLookup(),
+        rawseq_seq_sequence_store_override=FakeSequenceStore(),
+        rawseq_seq_context_encoder_override=FakeContextEncoder(32),
+    )
+    model.controller.seq_retriever = FakeRetriever(dim=32)
+    model.log = lambda *args, **kwargs: None
+    recording_fusion = RecordingFusion()
+    model.controller.seq_fusion = recording_fusion
+
+    batch = {
+        "seq_embedding": torch.randn(1, 9, 32, 2),
+        "seq_mask": torch.ones(1, 9, 2),
+        "raw_sequence": ["ACDEFGHIK"],
+    }
+    _ = model(batch)
+
+    actual = recording_fusion.last_query_tokens
+    if actual is None:
+        raise AssertionError("Fusion module did not receive query tokens")
+
+    ctx = model.controller.seq_context_encoder
+    if not isinstance(ctx, FakeContextEncoder):
+        raise AssertionError("Expected fake context encoder override")
+
+    expected = ctx.forward(batch["raw_sequence"])[0]
+    if expected.shape[0] != batch["seq_embedding"].shape[1]:
+        raise AssertionError("Test setup expects query token length to match sequence length")
+
+    original = batch["seq_embedding"][0, :, :, 0]
+    if torch.allclose(actual, original):
+        raise AssertionError("Fusion still received original seq_embedding tokens instead of ESM1b query tokens")
+    if not torch.allclose(actual, expected, atol=1e-5, rtol=1e-5):
+        raise AssertionError("Fusion query tokens do not match ESM1b-encoded raw query sequence")
+
+
+def test_rawseq_ragstyle_seq_query_encoder_gets_gradients():
+    if not _HAS_LIGHTNING_MODEL_DEPS:
+        print("[SKIP] rawseq seq-query gradient test: missing optional OpenFold training deps")
+        return
+
+    torch.manual_seed(0)
+    model = RetrievalAugmentedLightningModule(
+        config_preset="seqemb_initial_training",
+        seq_embedding_dim=32,
+        top_k=3,
+        lr=1e-2,
+        struct_index_path=None,
+        struct_index_dim=16,
+        seq_index_path="dummy.seq.index",
+        seq_index_dim=32,
+        retrieval_ablation="seq_only",
+        retrieval_pipeline="rawseq_esm1b_ragstyle",
+        fusion_name="rag_esm_port",
+        fusion_params={
+            "num_heads": 8,
+            "dropout": 0.0,
+            "mlp_hidden_mult": 2,
+            "num_blocks": 2,
+            "layers_with_cross_attention": "all",
+            "skip_cross_ratio": 0.0,
+        },
+        retrieval_injection_stages=("input",),
+        rawseq_seq_index_ids_path="unused_ids.txt",
+        rawseq_seq_db_fasta_path="unused.fasta",
+        rawseq_seq_db_fasta_index_db="unused.idx.sqlite",
+        backbone_factory=FakeBackbone,
+        loss_factory=FakeLoss,
+        freeze_backbone=False,
+        seq_query_encoder_override=FakeQueryEncoder(32),
+        rawseq_seq_row_lookup_override=FakeRowLookup(),
+        rawseq_seq_sequence_store_override=FakeSequenceStore(),
+        rawseq_seq_context_encoder_override=FakeContextEncoder(32),
+    )
+    model.controller.seq_retriever = FakeRetriever(dim=32)
+    model.controller.seq_fusion = ScoreDependentFusion()
+    model.log = lambda *args, **kwargs: None
+
+    batch = {
+        "seq_embedding": torch.randn(2, 6, 32, 2, requires_grad=True),
+        "seq_mask": torch.ones(2, 6, 2),
+        "raw_sequence": ["ACDEFGHIK", "LMNPQRSTV"],
+    }
+    optimizer = model.configure_optimizers()
+    optimizer.zero_grad(set_to_none=True)
+    loss = model.training_step(batch, 0)
+    loss.backward()
+
+    seq_encoder = model.controller.query_pipeline.seq_encoder
+    if not isinstance(seq_encoder, FakeQueryEncoder):
+        raise AssertionError("Expected fake sequence query encoder override")
+    grad = seq_encoder.proj.weight.grad
+    if grad is None:
+        raise AssertionError("Rawseq seq query encoder did not receive gradients")
+    if not torch.isfinite(grad).all():
+        raise AssertionError("Rawseq seq query encoder gradient contains non-finite values")
+    if float(grad.abs().sum().item()) == 0.0:
+        raise AssertionError("Rawseq seq query encoder gradient is identically zero")
+
+
 def test_invalid_frozen_backbone_config_rejected():
     cfg = {
         "model": {
@@ -522,6 +708,8 @@ def main():
     test_auto_checkpoint_resolution_and_optimizer_param_groups()
     test_embed_project_pipeline_query_encoder_gradients_and_fit_smoke()
     test_rawseq_ragstyle_pipeline_context_encoder_gradients()
+    test_rawseq_ragstyle_uses_esm1b_query_tokens_for_fusion()
+    test_rawseq_ragstyle_seq_query_encoder_gets_gradients()
     print("[OK] modular retrieval framework tests passed")
 
 

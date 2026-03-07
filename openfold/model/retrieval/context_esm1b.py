@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import re
-from typing import Dict, List, Sequence, Tuple
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -44,6 +47,113 @@ def _map_esm_efficient_model_name(model_name: str) -> str:
     return name
 
 
+def _normalize_backend_name(name: Optional[str]) -> Optional[str]:
+    if name is None:
+        return None
+    key = str(name).strip().lower()
+    if not key or key in {"none", "null"}:
+        return None
+    if key not in {"fair_esm", "esm_efficient"}:
+        raise ValueError(
+            f"Unsupported ESM1b backend={name!r}. "
+            "Expected one of {'fair_esm', 'esm_efficient'}."
+        )
+    return key
+
+
+def _resolve_torch_hub_checkpoints_dir(torch_hub_dir: Optional[str]) -> Path:
+    if torch_hub_dir:
+        root = Path(torch_hub_dir).expanduser()
+        if root.name == "checkpoints":
+            return root
+        if root.name == "hub":
+            return root / "checkpoints"
+        if (root / "checkpoints").exists():
+            return root / "checkpoints"
+        return root
+
+    torch_home = os.environ.get("TORCH_HOME", None)
+    if torch_home:
+        return Path(torch_home).expanduser() / "hub" / "checkpoints"
+
+    return Path(torch.hub.get_dir()) / "checkpoints"
+
+
+def _resolve_hf_hub_root(hf_cache_dir: Optional[str]) -> Path:
+    if hf_cache_dir:
+        root = Path(hf_cache_dir).expanduser()
+        if root.name == "hub":
+            return root
+        return root / "hub"
+
+    hf_home = os.environ.get("HF_HOME", None)
+    if hf_home:
+        return Path(hf_home).expanduser() / "hub"
+
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE", None)
+    if hub_cache:
+        return Path(hub_cache).expanduser()
+
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _resolve_fair_esm_checkpoint_path(
+    model_name: str,
+    torch_hub_dir: Optional[str],
+) -> Optional[Path]:
+    raw = Path(str(model_name).strip()).expanduser()
+    if raw.is_file():
+        return raw
+
+    stem = raw.stem if raw.suffix else raw.name
+    if not stem:
+        return None
+
+    checkpoints_dir = _resolve_torch_hub_checkpoints_dir(torch_hub_dir)
+    candidate = checkpoints_dir / f"{stem}.pt"
+    regression = checkpoints_dir / f"{stem}-contact-regression.pt"
+    if candidate.is_file() and (regression.is_file() or ("esm1v" in stem or "esm_if" in stem)):
+        return candidate
+    return None
+
+
+def _esm_efficient_filename_for_name(model_name: str) -> str:
+    raw = Path(str(model_name).strip()).expanduser()
+    if raw.is_file():
+        if raw.suffix.lower() != ".safetensors":
+            raise ValueError(
+                f"ESM-efficient backend requires a .safetensors checkpoint, got: {raw}"
+            )
+        return raw.name
+
+    name = _map_esm_efficient_model_name(model_name)
+    lower = name.lower()
+    if lower == "esm1b":
+        return "esm1b.safetensors"
+    return f"{name}.safetensors"
+
+
+def _resolve_esm_efficient_checkpoint_path(
+    model_name: str,
+    hf_cache_dir: Optional[str],
+) -> Optional[Path]:
+    raw = Path(str(model_name).strip()).expanduser()
+    if raw.is_file():
+        if raw.suffix.lower() != ".safetensors":
+            raise ValueError(
+                f"ESM-efficient backend requires a .safetensors checkpoint, got: {raw}"
+            )
+        return raw
+
+    filename = _esm_efficient_filename_for_name(model_name)
+    hub_root = _resolve_hf_hub_root(hf_cache_dir)
+    pattern = hub_root / "models--mhcelik--esm-efficient" / "snapshots" / "*" / filename
+    matches = sorted(glob.glob(str(pattern)))
+    if matches:
+        return Path(matches[-1])
+    return None
+
+
 class ESM1bContextEncoder(nn.Module):
     """Token-level ESM1b encoder for retrieved raw-sequence context."""
 
@@ -65,32 +175,34 @@ class ESM1bContextEncoder(nn.Module):
         ),
         train_layer_norm: bool = False,
         backend: str = "fair_esm",
+        fallback_backend: Optional[str] = None,
+        allow_download: bool = True,
+        hf_cache_dir: Optional[str] = None,
+        torch_hub_dir: Optional[str] = None,
         esm_efficient_use_pretrained: bool = True,
         esm_efficient_compute_dtype: str = "bfloat16",
     ):
         super().__init__()
 
-        backend_key = str(backend).strip().lower()
-        if backend_key not in {"fair_esm", "esm_efficient"}:
-            raise ValueError(
-                f"Unsupported ESM1b backend={backend!r}. "
-                "Expected one of {'fair_esm', 'esm_efficient'}."
-            )
+        backend_key = _normalize_backend_name(backend)
+        if backend_key is None:
+            raise ValueError("ESM1b backend must not be empty.")
+        fallback_backend_key = _normalize_backend_name(fallback_backend)
+        self.requested_backend = backend_key
         self.backend = backend_key
 
-        if self.backend == "fair_esm":
-            self._init_fair_esm_model(
-                model_name=model_name,
-                truncation_seq_length=truncation_seq_length,
-                repr_layer=repr_layer,
-            )
-        else:
-            self._init_esm_efficient_model(
-                model_name=model_name,
-                repr_layer=repr_layer,
-                use_pretrained=bool(esm_efficient_use_pretrained),
-                compute_dtype=str(esm_efficient_compute_dtype),
-            )
+        self._init_model_with_fallback(
+            backend=backend_key,
+            fallback_backend=fallback_backend_key,
+            model_name=model_name,
+            truncation_seq_length=truncation_seq_length,
+            repr_layer=repr_layer,
+            allow_download=bool(allow_download),
+            hf_cache_dir=hf_cache_dir,
+            torch_hub_dir=torch_hub_dir,
+            use_pretrained=bool(esm_efficient_use_pretrained),
+            compute_dtype=str(esm_efficient_compute_dtype),
+        )
 
         requested_mode = str(tuning_mode).strip().lower()
         if requested_mode not in {"lora", "full", "frozen"}:
@@ -110,11 +222,100 @@ class ESM1bContextEncoder(nn.Module):
             train_layer_norm=bool(train_layer_norm),
         )
 
+    def _init_model_with_fallback(
+        self,
+        backend: str,
+        fallback_backend: Optional[str],
+        model_name: str,
+        truncation_seq_length: int,
+        repr_layer: int,
+        allow_download: bool,
+        hf_cache_dir: Optional[str],
+        torch_hub_dir: Optional[str],
+        use_pretrained: bool,
+        compute_dtype: str,
+    ) -> None:
+        errors: List[Tuple[str, Exception]] = []
+        candidates = [backend]
+        if fallback_backend is not None and fallback_backend != backend:
+            candidates.append(fallback_backend)
+
+        for candidate_backend in candidates:
+            t0 = time.time()
+            try:
+                logger.info(
+                    "Initializing ESM1b context encoder backend=%s model_name=%s allow_download=%s",
+                    candidate_backend,
+                    model_name,
+                    allow_download,
+                )
+                self._init_backend(
+                    backend=candidate_backend,
+                    model_name=model_name,
+                    truncation_seq_length=truncation_seq_length,
+                    repr_layer=repr_layer,
+                    allow_download=allow_download,
+                    hf_cache_dir=hf_cache_dir,
+                    torch_hub_dir=torch_hub_dir,
+                    use_pretrained=use_pretrained,
+                    compute_dtype=compute_dtype,
+                )
+                self.backend = candidate_backend
+                logger.info(
+                    "Initialized ESM1b context encoder backend=%s in %.2fs",
+                    candidate_backend,
+                    time.time() - t0,
+                )
+                return
+            except Exception as exc:
+                errors.append((candidate_backend, exc))
+                logger.warning(
+                    "Failed to initialize ESM1b context encoder backend=%s: %s",
+                    candidate_backend,
+                    exc,
+                )
+
+        details = "; ".join(f"{name}: {type(exc).__name__}: {exc}" for name, exc in errors)
+        raise RuntimeError(f"Unable to initialize any ESM1b backend. Tried [{details}]") from errors[-1][1]
+
+    def _init_backend(
+        self,
+        backend: str,
+        model_name: str,
+        truncation_seq_length: int,
+        repr_layer: int,
+        allow_download: bool,
+        hf_cache_dir: Optional[str],
+        torch_hub_dir: Optional[str],
+        use_pretrained: bool,
+        compute_dtype: str,
+    ) -> None:
+        if backend == "fair_esm":
+            self._init_fair_esm_model(
+                model_name=model_name,
+                truncation_seq_length=truncation_seq_length,
+                repr_layer=repr_layer,
+                allow_download=allow_download,
+                torch_hub_dir=torch_hub_dir,
+            )
+            return
+
+        self._init_esm_efficient_model(
+            model_name=model_name,
+            repr_layer=repr_layer,
+            use_pretrained=use_pretrained,
+            compute_dtype=compute_dtype,
+            allow_download=allow_download,
+            hf_cache_dir=hf_cache_dir,
+        )
+
     def _init_fair_esm_model(
         self,
         model_name: str,
         truncation_seq_length: int,
         repr_layer: int,
+        allow_download: bool,
+        torch_hub_dir: Optional[str],
     ) -> None:
         try:
             from esm import pretrained
@@ -123,7 +324,16 @@ class ESM1bContextEncoder(nn.Module):
                 "Failed to import `esm`. Install fair-esm in the active environment."
             ) from exc
 
-        model, alphabet = pretrained.load_model_and_alphabet(model_name)
+        local_path = _resolve_fair_esm_checkpoint_path(model_name, torch_hub_dir=torch_hub_dir)
+        if local_path is not None:
+            model, alphabet = pretrained.load_model_and_alphabet_local(str(local_path))
+        elif not allow_download:
+            raise FileNotFoundError(
+                f"Could not resolve local fair-ESM checkpoint for model_name={model_name!r} "
+                f"under checkpoints dir={_resolve_torch_hub_checkpoints_dir(torch_hub_dir)}"
+            )
+        else:
+            model, alphabet = pretrained.load_model_and_alphabet(model_name)
         self.model = model
         self.alphabet = alphabet
         self.batch_converter = alphabet.get_batch_converter(truncation_seq_length=int(truncation_seq_length))
@@ -138,6 +348,8 @@ class ESM1bContextEncoder(nn.Module):
         repr_layer: int,
         use_pretrained: bool,
         compute_dtype: str,
+        allow_download: bool,
+        hf_cache_dir: Optional[str],
     ) -> None:
         if int(repr_layer) != 33:
             raise ValueError(
@@ -145,7 +357,7 @@ class ESM1bContextEncoder(nn.Module):
                 "set rawseq_esm1b.esm1b_repr_layer=33."
             )
         try:
-            from esme import ESM, ESM1b
+            from esme import ESM1b
             from esme.alphabet import Alphabet, tokenize
         except Exception as exc:
             raise RuntimeError(
@@ -153,8 +365,17 @@ class ESM1bContextEncoder(nn.Module):
             ) from exc
 
         resolved_name = _map_esm_efficient_model_name(model_name)
+        resolved_path = _resolve_esm_efficient_checkpoint_path(resolved_name, hf_cache_dir=hf_cache_dir)
         if use_pretrained:
-            model = ESM.from_pretrained(resolved_name, device="cpu")
+            if resolved_path is not None:
+                model = ESM1b.from_pretrained(str(resolved_path), device="cpu")
+            elif not allow_download:
+                raise FileNotFoundError(
+                    f"Could not resolve local esm-efficient checkpoint for model_name={model_name!r} "
+                    f"under cache dir={_resolve_hf_hub_root(hf_cache_dir)}"
+                )
+            else:
+                model = ESM1b.from_pretrained(resolved_name, device="cpu")
         else:
             model = ESM1b()
 
