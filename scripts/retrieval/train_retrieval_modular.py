@@ -122,6 +122,41 @@ def _auto_accelerator() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
 
 
+def _disable_broken_mpi_detection_for_flux() -> None:
+    classes = []
+
+    try:
+        import lightning.fabric.plugins.environments.mpi as fabric_mpi_module
+
+        classes.append(fabric_mpi_module.MPIEnvironment)
+    except Exception:
+        pass
+
+    try:
+        from lightning.pytorch.plugins import environments as pl_env_module
+
+        classes.append(pl_env_module.MPIEnvironment)
+    except Exception:
+        pass
+
+    seen = set()
+    for env_cls in classes:
+        if env_cls in seen:
+            continue
+        seen.add(env_cls)
+
+        original_detect = env_cls.detect
+
+        def _safe_detect(_original_detect=original_detect) -> bool:
+            try:
+                return _original_detect()
+            except Exception as exc:
+                logger.warning("Ignoring MPIEnvironment.detect() failure in --flux mode: %s", exc)
+                return False
+
+        env_cls.detect = staticmethod(_safe_detect)
+
+
 def _resolve_strategy(trainer_cfg: Dict, *, use_flux: bool):
     strategy = str(trainer_cfg.get("strategy", "auto"))
     devices = int(trainer_cfg.get("devices", 1))
@@ -518,6 +553,9 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    if args.flux:
+        _disable_broken_mpi_detection_for_flux()
 
     cfg = _load_config(args.config)
     cfg = _apply_overrides(cfg, args.overrides)
