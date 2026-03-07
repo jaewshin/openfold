@@ -178,12 +178,12 @@ ESM1B_SAFE="/p/vast1/shin9/hf_cache/hub/models--mhcelik--esm-efficient/blobs/cc4
 flux run --output=job_$name.out -N1 -n4 --exclusive -o mpibind=verbose:1 -o fastload \
 	python /p/vast1/shin9/openfold/scripts/retrieval/train_retrieval_modular.py \
 	--config $config \
+	--flux
 
 cp $config $outdir/$name/
 chmod 775 -R $outdir/$name
 
 exit 0
-
 
 
 

@@ -11,6 +11,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
+# LLNL mpibind workaround: Lightning needs to see all GPUs before torch initializes.
+if "ALL_CUDA_VISIBLE_DEVICES" in os.environ:
+    visible_devices = os.environ.get("ROCR_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    if visible_devices:
+        os.environ["ORIG_ROCR_VISIBLE_DEVICES"] = visible_devices
+    all_visible = os.environ["ALL_CUDA_VISIBLE_DEVICES"]
+    os.environ["CUDA_VISIBLE_DEVICES"] = all_visible
+    os.environ["ROCR_VISIBLE_DEVICES"] = all_visible
+
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -105,6 +114,23 @@ def _apply_overrides(cfg: Dict, overrides: Sequence[str]) -> Dict:
 
 def _auto_accelerator() -> str:
     return "gpu" if torch.cuda.is_available() else "cpu"
+
+
+def _resolve_strategy(trainer_cfg: Dict, *, use_flux: bool):
+    strategy = str(trainer_cfg.get("strategy", "auto"))
+    devices = int(trainer_cfg.get("devices", 1))
+
+    if not use_flux or devices <= 1:
+        return strategy
+
+    if strategy.lower() not in {"auto", "ddp"}:
+        raise ValueError(
+            f"--flux currently supports trainer.strategy in {{'auto', 'ddp'}} for multi-GPU runs; got {strategy!r}"
+        )
+
+    from scripts.retrieval.flux_environment import FLUXEnvironment
+
+    return pl.strategies.DDPStrategy(cluster_environment=FLUXEnvironment())
 
 
 def _normalize_checkpoint_path(path_like: str, base_dir: Path) -> Path:
@@ -252,6 +278,7 @@ def _build_trainer_kwargs(
     base_dir: Path,
     trainer_logger,
     callbacks: Sequence[Any],
+    use_flux: bool,
 ) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
         "default_root_dir": str(output_dir),
@@ -266,7 +293,7 @@ def _build_trainer_kwargs(
         "log_every_n_steps": int(trainer_cfg.get("log_every_n_steps", 25)),
         "enable_checkpointing": bool(trainer_cfg.get("enable_checkpointing", True)),
         "num_nodes": int(trainer_cfg.get("num_nodes", 1)),
-        "strategy": str(trainer_cfg.get("strategy", "auto")),
+        "strategy": _resolve_strategy(trainer_cfg, use_flux=use_flux),
         "callbacks": list(callbacks),
     }
 
@@ -481,6 +508,7 @@ def main():
         default=[],
         help="Override config values as dotted.key=value (repeatable)",
     )
+    parser.add_argument("--flux", action="store_true", help="Use FLUXEnvironment for externally launched DDP")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -512,6 +540,7 @@ def main():
         base_dir=REPO_ROOT,
         trainer_logger=trainer_logger,
         callbacks=callbacks,
+        use_flux=args.flux,
     )
     resume_ckpt_path = _resolve_trainer_resume_ckpt_path(
         trainer_cfg,
