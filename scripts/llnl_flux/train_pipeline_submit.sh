@@ -16,6 +16,15 @@ USAGE
   exit 1
 }
 
+require_dir() {
+  local path="$1"
+  local desc="$2"
+  if [ ! -d "$path" ]; then
+    echo "Error: Missing ${desc}: ${path}" >&2
+    exit 1
+  fi
+}
+
 abspath() {
   local path="$1"
   if [ -d "$path" ]; then
@@ -165,7 +174,12 @@ local_hf_home="${local_root}/hf_home"
 local_hf_snapshot_dir="${local_hf_home}/hub/models--mhcelik--esm-efficient/snapshots/local"
 mkdir -p "$local_uniref_dir" "$local_torch_home/hub/checkpoints" "$local_hf_snapshot_dir"
 
-require_file "$manifest_path" "manifest"
+if [[ "$data_input_mode" != "auto" && "$data_input_mode" != "manifest" && "$data_input_mode" != "dataset" ]]; then
+  echo "Error: OPENFOLD_FLUX_DATA_INPUT_MODE must be one of {auto, manifest, dataset}; got '${data_input_mode}'" >&2
+  exit 1
+fi
+
+require_dir "$seq_emb_dir" "sequence embedding directory"
 require_file "$seq_index_path" "sequence FAISS index"
 require_file "$seq_index_ids_path" "sequence FAISS row-id map"
 require_file "$seq_db_fasta_path" "sequence FASTA"
@@ -174,6 +188,29 @@ require_file "$openfold_checkpoint_path" "OpenFold checkpoint"
 require_file "$esm2_model_path" "ESM2 checkpoint"
 require_file "$esm2_regression_path" "ESM2 regression checkpoint"
 require_file "$esm1b_safetensors_path" "ESM1b safetensors checkpoint"
+
+selected_data_input_mode="$data_input_mode"
+if [ "$selected_data_input_mode" = "auto" ]; then
+  if [ -d "${ready_dir}/structures" ]; then
+    selected_data_input_mode="dataset"
+  else
+    selected_data_input_mode="manifest"
+  fi
+fi
+
+case "$selected_data_input_mode" in
+  dataset)
+    require_dir "$ready_dir" "retrieval-ready dataset directory"
+    require_dir "${ready_dir}/structures" "retrieval-ready structures directory"
+    ;;
+  manifest)
+    require_file "$manifest_path" "manifest"
+    ;;
+  *)
+    echo "Error: unsupported resolved data input mode '${selected_data_input_mode}'" >&2
+    exit 1
+    ;;
+esac
 
 local_seq_index_path="${local_uniref_dir}/$(basename "$seq_index_path")"
 local_seq_index_ids_path="${local_uniref_dir}/$(basename "$seq_index_ids_path")"
@@ -274,7 +311,7 @@ train_cmd=(
   python -u "${repo_root}/scripts/retrieval/train_retrieval_modular.py"
   --config "$config"
   --set "trainer.output_dir=${run_dir}"
-  --set "data.manifest_path=${manifest_path}"
+  --set "data.seq_embedding_dir=${seq_emb_dir}"
   --set "retrieval.sources.seq.index_path=${local_seq_index_path}"
   --set "retrieval.sources.seq.index_dim=480"
   --set "retrieval.rawseq_esm1b.seq_index_ids_path=${local_seq_index_ids_path}"
@@ -291,6 +328,15 @@ train_cmd=(
   --set "wandb.resume=allow"
 )
 
+case "$selected_data_input_mode" in
+  dataset)
+    train_cmd+=(--set "data.dataset_dir=${ready_dir}")
+    ;;
+  manifest)
+    train_cmd+=(--set "data.manifest_path=${manifest_path}")
+    ;;
+esac
+
 if [ -n "$max_time_override" ]; then
   train_cmd+=(--set "trainer.max_time='${max_time_override}'")
 fi
@@ -302,6 +348,12 @@ echo "Run directory: ${run_dir}"
 echo "Flux logs: ${flux_log_dir}"
 echo "Resume checkpoint: ${resume_ckpt_path:-<none>}"
 echo "W&B run id: ${wandb_run_id}"
+echo "Repo root: ${repo_root}"
+echo "Data root: ${data_root}"
+echo "Ready dir: ${ready_dir}"
+echo "Seq emb dir: ${seq_emb_dir}"
+echo "Manifest path: ${manifest_path}"
+echo "Selected data input mode: ${selected_data_input_mode}"
 echo "Local staging root: ${local_root}"
 
 task_output="${flux_log_dir}/${name}_train-{{id}}.out"
