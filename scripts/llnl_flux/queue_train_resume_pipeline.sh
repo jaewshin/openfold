@@ -2,8 +2,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/train_pipeline.conf"
-submission_script="${SCRIPT_DIR}/train_pipeline_submit.sh"
+DEFAULT_REPO_ROOT="${OPENFOLD_FLUX_REPO_ROOT:-/p/vast1/shin9/openfold}"
+CONFIG_PATH="${DEFAULT_REPO_ROOT}/scripts/llnl_flux/train_pipeline.conf"
+if [ ! -f "$CONFIG_PATH" ]; then
+  CONFIG_PATH="${SCRIPT_DIR}/train_pipeline.conf"
+fi
+if [ ! -f "$CONFIG_PATH" ]; then
+  echo "Error: Could not locate train_pipeline.conf. Tried '${DEFAULT_REPO_ROOT}/scripts/llnl_flux/train_pipeline.conf' and '${SCRIPT_DIR}/train_pipeline.conf'." >&2
+  exit 1
+fi
+source "$CONFIG_PATH"
+submission_script="${repo_root}/scripts/llnl_flux/train_pipeline_submit.sh"
 
 usage() {
   cat <<USAGE >&2
