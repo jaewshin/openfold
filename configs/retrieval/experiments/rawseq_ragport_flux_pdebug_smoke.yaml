@@ -1,17 +1,44 @@
-defaults:
-  - rawseq_ragport_flux.yaml
+defaults:                                                                                                               
+  - rawseq_ragport_flux.yaml                                                                                            
+                                                                                                                        
+data:                                                                                                                   
+  manifest_path: /p/vast1/shin9/openfold/experiments/data/retrieval_ready_mmseqs/manifest.jsonl                         
+  seq_embedding_dir: /p/vast1/shin9/openfold/experiments/data/retrieval_ready_mmseqs/seq_embedding_esm1b                
+  num_workers: 0                                                                                                        
+                                                                                                                        
+trainer:                                                                                                                
+  output_dir: /p/vast1/shin9/openfold/logs/flux_runs/rawseq_ragport_flux_pdebug_smoke                                   
+  resume_ckpt_path: null                                                                                                
+  num_nodes: 1                                                                                                          
+  val_check_interval: 10                                                                                                
+  max_steps: 10                                                                                                         
+  log_every_n_steps: 1                                                                                                  
+  checkpoint:                                                                                                           
+    every_n_train_steps: 5                                                                                              
+    save_last: true                                                                                                     
+    save_top_k: -1                                                                                                      
+    filename: "step={step}"                                                                                             
+    save_on_train_epoch_end: false                                                                                      
+                                                                                                                        
+model:                                                                                                                  
+  openfold_checkpoint: /p/vast1/shin9/openfold/resources/openfold_soloseq_params/seq_model_esm1b_ptm.pt                 
 
-data:
-  num_workers: 0
+retrieval:                                                                                                              
+  sources:                                                                                                              
+    seq:                                                                                                                
+      index_path: /p/vast1/shin9/openfold/experiments/data/u50_esm2_35M.index
+      index_dim: 480
+  rawseq_esm1b:
+    seq_index_ids_path: /p/vast1/shin9/openfold/experiments/data/u50_esm2_35M_ids.txt
+    seq_db_fasta_path: /p/vast1/shin9/openfold/experiments/data/uniref50.fasta
+    seq_db_fasta_index_db: /p/vast1/shin9/openfold/experiments/data/uniref50.seqio.sqlite
+    esm1b_model_name: /p/vast1/shin9/hf_cache/hub/models--mhcelik--esm-efficient/snapshots/48bfb7a279257ea8645aad96da4314a88a2341d5/esm1b.safetensors
+    hf_cache_dir: /p/vast1/shin9/hf_cache
+    torch_hub_dir: /p/vast1/shin9/.cache/torch/hub
 
-trainer:
-  num_nodes: 1
-  val_check_interval: 10
-  max_steps: 10
-  log_every_n_steps: 1
-  checkpoint:
-    every_n_train_steps: 1
-    save_last: true
-    save_top_k: -1
-    filename: "step={step}"
-    save_on_train_epoch_end: false
+wandb:
+  enabled: true
+  project: openfold-retrieval
+  entity: jshin
+  api_key_env: 256af952437873cc1446152d821a4cfe7dcbadc8
+  run_name: test_retrieval_openfold_soloseq
