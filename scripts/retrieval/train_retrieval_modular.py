@@ -23,6 +23,12 @@ if "ALL_CUDA_VISIBLE_DEVICES" in os.environ:
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.plugins.environments import (
+    MPIEnvironment,
+    LightningEnvironment,
+    TorchElasticEnvironment,
+    SLURMEnvironment,
+)
 
 # Allow running directly from any working directory.
 REPO_ROOT = Path(__file__).resolve().parents[2]
